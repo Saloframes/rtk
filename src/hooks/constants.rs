@@ -25,8 +25,6 @@ pub const GEMINI_DIR: &str = ".gemini";
 #[allow(dead_code)]
 pub const ANTIGRAVITY_DIR: &str = ".agents";
 
-/// Native Rust hook command for Google Antigravity CLI (agy).
-pub const ANTIGRAVITY_HOOK_COMMAND: &str = "rtk hook antigravity";
 /// Config subdirectory for the Antigravity CLI (agy) under ~/.gemini/
 pub const AGY_CLI_SUBDIR: &str = "antigravity-cli";
 
