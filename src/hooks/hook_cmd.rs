@@ -638,7 +638,7 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
     // the review fires on the original binary, not the overwritten one.
     let output = json!({
         "denyReason": format!(
-            "RTK: use '{}' instead of '{}' (60-90% token savings — see CLAUDE.md)",
+            "RTK: use '{}' instead of '{}' (60-90% token savings — see GEMINI.md)",
             rewritten, cmd
         )
     });
@@ -690,7 +690,7 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
     // hits the Allow list (command(rtk)) and bypasses the request-review gate.
     let output = json!({
         "denyReason": format!(
-            "RTK: use '{}' instead of '{}' (60-90% token savings — see CLAUDE.md)",
+            "RTK: use '{}' instead of '{}' (60-90% token savings — see GEMINI.md)",
             rewritten, cmd
         )
     });
