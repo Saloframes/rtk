@@ -597,15 +597,19 @@ fn process_antigravity_payload(v: &Value) -> PayloadAction {
 }
 
 fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
-    let cmd = match tool_name {
-        "run_command" => v
-            .pointer("/tool_input/CommandLine")
-            .and_then(|c| c.as_str())
-            .unwrap_or(""),
-        "Bash" | "bash" => v
-            .pointer("/tool_input/command")
-            .and_then(|c| c.as_str())
-            .unwrap_or(""),
+    let (cmd, arg_key) = match tool_name {
+        "run_command" => (
+            v.pointer("/tool_input/CommandLine")
+                .and_then(|c| c.as_str())
+                .unwrap_or(""),
+            "CommandLine",
+        ),
+        "Bash" | "bash" => (
+            v.pointer("/tool_input/command")
+                .and_then(|c| c.as_str())
+                .unwrap_or(""),
+            "command",
+        ),
         _ => return PayloadAction::Ignore,
     };
 
@@ -631,16 +635,11 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
         }
     };
 
-    // agy deny-with-reason: deny the original command and tell the model the
-    // exact replacement. The model retries with the rtk-prefixed command, which
-    // hits the Allow list (command(rtk)) and bypasses the request-review gate.
-    // The overwrite mechanism is broken under toolPermission=request-review —
-    // the review fires on the original binary, not the overwritten one.
     let output = json!({
-        "denyReason": format!(
-            "RTK: use '{}' instead of '{}' (60-90% token savings — see GEMINI.md)",
-            rewritten, cmd
-        )
+        "overwrite": {
+            "name": tool_name,
+            "args": { arg_key: rewritten }
+        }
     });
 
     PayloadAction::Rewrite {
@@ -651,15 +650,19 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
 }
 
 fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
-    let cmd = match tool_name {
-        "run_command" => v
-            .pointer("/toolCall/args/CommandLine")
-            .and_then(|c| c.as_str())
-            .unwrap_or(""),
-        "Bash" | "bash" => v
-            .pointer("/toolCall/args/command")
-            .and_then(|c| c.as_str())
-            .unwrap_or(""),
+    let (cmd, arg_key) = match tool_name {
+        "run_command" => (
+            v.pointer("/toolCall/args/CommandLine")
+                .and_then(|c| c.as_str())
+                .unwrap_or(""),
+            "CommandLine",
+        ),
+        "Bash" | "bash" => (
+            v.pointer("/toolCall/args/command")
+                .and_then(|c| c.as_str())
+                .unwrap_or(""),
+            "command",
+        ),
         _ => return PayloadAction::Ignore,
     };
 
@@ -685,14 +688,21 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
         }
     };
 
-    // agy deny-with-reason: deny the original command and tell the model the
-    // exact replacement. The model retries with the rtk-prefixed command, which
-    // hits the Allow list (command(rtk)) and bypasses the request-review gate.
+    // Preserve extra metadata fields (Cwd, WaitMsBeforeAsync, etc.) from the
+    // original args; only replace the command string itself.
+    let mut updated_args = v
+        .pointer("/toolCall/args")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_args.as_object_mut() {
+        obj.insert(arg_key.to_string(), Value::String(rewritten.clone()));
+    }
+
     let output = json!({
-        "denyReason": format!(
-            "RTK: use '{}' instead of '{}' (60-90% token savings — see GEMINI.md)",
-            rewritten, cmd
-        )
+        "overwrite": {
+            "name": tool_name,
+            "args": updated_args
+        }
     });
 
     PayloadAction::Rewrite {
@@ -706,12 +716,11 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
 ///
 /// Reads a JSON payload from stdin and outputs a PreToolHookResult protojson.
 ///
-/// Strategy: deny commands that need rewriting with a `denyReason` that names
-/// the rtk-prefixed replacement. The model retries with the exact replacement,
-/// which agy allows immediately because `command(rtk)` is in the Allow list
-/// (bypassing the `toolPermission=request-review` gate). The `overwrite` field
-/// was abandoned because under request-review, the review fires on the original
-/// binary — the model never sees the overwritten command.
+/// Strategy: rewrite the command in-place using the `overwrite` field
+/// (PreToolHookResult.overwrite). Under `toolPermission=always-proceed` this
+/// is transparent — no ⚠ warning, no extra LLM call. Under `request-review`
+/// the review fires on the original binary so RTK is bypassed for that turn,
+/// but the user is not blocked.
 pub fn run_antigravity() -> Result<()> {
     let input = read_stdin_limited()?;
     let input = input.trim();
@@ -1257,33 +1266,20 @@ mod tests {
     fn test_agy_simple_bash_rewrite() {
         let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        // deny-with-reason: no overwrite, no allowTool — just denyReason
-        assert!(
-            v.get("overwrite").is_none(),
-            "must not use overwrite (broken under request-review)"
-        );
-        assert!(v.get("allowTool").is_none());
-        let reason = v["denyReason"].as_str().unwrap();
-        assert!(
-            reason.contains("rtk git status"),
-            "deny reason must name the replacement: {reason}"
-        );
+        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        let ow = &v["overwrite"];
+        assert_eq!(ow["name"].as_str().unwrap(), "Bash");
+        assert_eq!(ow["args"]["command"].as_str().unwrap(), "rtk git status");
     }
 
     #[test]
     fn test_agy_simple_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(
-            v.get("overwrite").is_none(),
-            "must not use overwrite (broken under request-review)"
-        );
-        assert!(v.get("allowTool").is_none());
-        let reason = v["denyReason"].as_str().unwrap();
-        assert!(
-            reason.contains("rtk git status"),
-            "deny reason must name the replacement: {reason}"
-        );
+        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        let ow = &v["overwrite"];
+        assert_eq!(ow["name"].as_str().unwrap(), "run_command");
+        assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
     }
 
     #[test]
@@ -1312,38 +1308,24 @@ mod tests {
     fn test_agy_rich_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(
-            v.get("overwrite").is_none(),
-            "must not use overwrite (broken under request-review)"
-        );
-        assert!(v.get("allowTool").is_none());
-        let reason = v["denyReason"].as_str().unwrap();
-        assert!(
-            reason.contains("rtk git status"),
-            "deny reason must name the replacement: {reason}"
-        );
+        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        let ow = &v["overwrite"];
+        assert_eq!(ow["name"].as_str().unwrap(), "run_command");
+        assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
     }
 
     #[test]
     fn test_agy_rich_bash_rewrite() {
         let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(
-            v.get("overwrite").is_none(),
-            "must not use overwrite (broken under request-review)"
-        );
-        assert!(v.get("allowTool").is_none());
-        let reason = v["denyReason"].as_str().unwrap();
-        assert!(
-            reason.contains("rtk cargo test"),
-            "deny reason must name the replacement: {reason}"
-        );
+        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        let ow = &v["overwrite"];
+        assert_eq!(ow["name"].as_str().unwrap(), "Bash");
+        assert_eq!(ow["args"]["command"].as_str().unwrap(), "rtk cargo test");
     }
 
     #[test]
-    fn test_agy_rich_deny_reason_names_replacement() {
-        // Extra args are no longer in the response (deny has no args to preserve),
-        // but the deny reason must still name the correct rewritten command.
+    fn test_agy_rich_overwrite_preserves_extra_args() {
         let input = json!({
             "toolCall": {
                 "name": "run_command",
@@ -1353,9 +1335,11 @@ mod tests {
         .to_string();
         let out = run_antigravity_inner(&input).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("overwrite").is_none());
-        let reason = v["denyReason"].as_str().unwrap();
-        assert!(reason.contains("rtk git status"), "deny reason: {reason}");
+        assert!(v.get("denyReason").is_none());
+        let ow = &v["overwrite"];
+        assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
+        assert_eq!(ow["args"]["Cwd"].as_str().unwrap(), "/tmp");
+        assert_eq!(ow["args"]["WaitMsBeforeAsync"].as_i64().unwrap(), 2000);
     }
 
     #[test]
