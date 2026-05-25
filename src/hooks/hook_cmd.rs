@@ -740,6 +740,22 @@ pub fn run_antigravity() -> Result<()> {
         return Ok(());
     }
 
+    // RTK_HOOK_DEBUG=1 — dump raw stdin to ~/.local/share/rtk/agy-hook-debug.log
+    if std::env::var("RTK_HOOK_DEBUG").as_deref() == Ok("1") {
+        let _ = (|| -> Option<()> {
+            let dir = dirs::home_dir()?.join(".local").join("share").join("rtk");
+            std::fs::create_dir_all(&dir).ok()?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("agy-hook-debug.log"))
+                .ok()?;
+            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
+            let _ = writeln!(f, "--- {} ---\n{}\n", ts, input);
+            Some(())
+        })();
+    }
+
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {

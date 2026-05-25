@@ -26,7 +26,6 @@ pub const GEMINI_DIR: &str = ".gemini";
 pub const ANTIGRAVITY_DIR: &str = ".agents";
 
 /// Config subdirectory for the Antigravity CLI (agy) under ~/.gemini/
-#[allow(dead_code)]
 pub const AGY_CLI_SUBDIR: &str = "antigravity-cli";
 
 pub const HERMES_DIR: &str = ".hermes";

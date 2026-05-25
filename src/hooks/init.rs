@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
-    CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, HOOKS_JSON, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR,
-    PLUGIN_SUBDIR,
+    AGY_CLI_SUBDIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, HOOKS_JSON, OPENCODE_PLUGIN_FILE,
+    OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
@@ -1755,12 +1755,14 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 const AGY_HOOK_NAME: &str = "rtk-antigravity";
 /// Subdirectory of ~/.gemini that holds agy's hooks.json.
 const AGY_CONFIG_SUBDIR: &str = "config";
+/// Permission token added to agy's settings.json so rewritten commands can run.
+const AGY_RTK_PERMISSION: &str = "command(rtk)";
 
 /// Entry point for `rtk init --agent agy` (global-only).
 ///
 /// Writes the RTK hook entry into `~/.gemini/config/hooks.json`.
 pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let InitContext { dry_run, .. } = ctx;
+    let InitContext { dry_run, verbose } = ctx;
 
     if !global {
         anyhow::bail!("agy CLI support is global-only. Use: rtk init -g --agent agy");
@@ -1784,6 +1786,10 @@ pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
 
     let patched = patch_agy_hooks_json(&hooks_path, ctx, &hook_command)?;
 
+    // Also grant command(rtk) permission so the rewritten commands are auto-allowed.
+    let settings_path = resolve_agy_settings_path()?;
+    let permission_granted = grant_agy_rtk_permission(&settings_path, dry_run, verbose)?;
+
     if dry_run {
         print_dry_run_footer();
     } else {
@@ -1792,7 +1798,10 @@ pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
         } else {
             println!("\nGoogle Antigravity CLI (agy) hook already present (global).\n");
         }
-        println!("  hooks.json: {}", hooks_path.display());
+        println!("  hooks.json:   {}", hooks_path.display());
+        if permission_granted {
+            println!("  settings.json: added command(rtk) to allow list");
+        }
         println!("  Restart agy. Test with: git status\n");
     }
 
@@ -1802,6 +1811,124 @@ pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
 fn resolve_agy_config_dir() -> Result<PathBuf> {
     let gemini_dir = resolve_home_subdir(GEMINI_DIR)?;
     Ok(gemini_dir.join(AGY_CONFIG_SUBDIR))
+}
+
+fn resolve_agy_settings_path() -> Result<PathBuf> {
+    let gemini_dir = resolve_home_subdir(GEMINI_DIR)?;
+    Ok(gemini_dir.join(AGY_CLI_SUBDIR).join(SETTINGS_JSON))
+}
+
+/// Add `command(rtk)` to `permissions.allow` in agy's settings.json.
+/// Returns true if the file was modified.
+fn grant_agy_rtk_permission(path: &Path, dry_run: bool, verbose: u8) -> Result<bool> {
+    let mut settings: serde_json::Value = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let already = settings
+        .pointer("/permissions/allow")
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(AGY_RTK_PERMISSION)));
+
+    if already {
+        if verbose > 0 {
+            eprintln!("agy settings.json: {} already present", AGY_RTK_PERMISSION);
+        }
+        return Ok(false);
+    }
+
+    if settings.get("permissions").is_none() {
+        settings["permissions"] = serde_json::json!({"allow": []});
+    }
+    if settings["permissions"].get("allow").is_none() {
+        settings["permissions"]["allow"] = serde_json::json!([]);
+    }
+    settings["permissions"]["allow"]
+        .as_array_mut()
+        .context("permissions.allow is not an array")?
+        .push(serde_json::Value::String(AGY_RTK_PERMISSION.to_string()));
+
+    let serialized =
+        serde_json::to_string_pretty(&settings).context("Failed to serialize agy settings.json")?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would add {} to agy settings.json: {}",
+            AGY_RTK_PERMISSION,
+            path.display()
+        );
+        return Ok(true);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = NamedTempFile::new_in(path.parent().context("agy settings.json has no parent")?)?;
+    fs::write(tmp.path(), &serialized)?;
+    tmp.persist(path)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Added {} to {}", AGY_RTK_PERMISSION, path.display());
+    }
+
+    Ok(true)
+}
+
+/// Remove `command(rtk)` from `permissions.allow` in agy's settings.json.
+/// Returns true if the file was modified.
+fn revoke_agy_rtk_permission(path: &Path, dry_run: bool, verbose: u8) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut settings: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+
+    let allow = match settings
+        .pointer_mut("/permissions/allow")
+        .and_then(|v| v.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return Ok(false),
+    };
+
+    let before = allow.len();
+    allow.retain(|v| v.as_str() != Some(AGY_RTK_PERMISSION));
+    if allow.len() == before {
+        return Ok(false);
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&settings).context("Failed to serialize agy settings.json")?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove {} from agy settings.json: {}",
+            AGY_RTK_PERMISSION,
+            path.display()
+        );
+        return Ok(true);
+    }
+
+    let tmp = NamedTempFile::new_in(path.parent().context("agy settings.json has no parent")?)?;
+    fs::write(tmp.path(), &serialized)?;
+    tmp.persist(path)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Removed {} from {}", AGY_RTK_PERMISSION, path.display());
+    }
+
+    Ok(true)
 }
 
 /// Patch `~/.gemini/config/hooks.json` with RTK's named PreToolUse hook.
@@ -1956,6 +2083,17 @@ fn uninstall_agy_cli(global: bool, ctx: InitContext) -> Result<()> {
                     hooks_path.display()
                 ));
             }
+        }
+    }
+
+    // Also revoke command(rtk) from settings.json.
+    if let Ok(settings_path) = resolve_agy_settings_path() {
+        if let Ok(true) = revoke_agy_rtk_permission(&settings_path, dry_run, verbose) {
+            removed.push(format!(
+                "agy settings.json: removed {} ({})",
+                AGY_RTK_PERMISSION,
+                settings_path.display()
+            ));
         }
     }
 
