@@ -637,10 +637,9 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
         }
     };
 
-    // agy PreToolHookResult: allowTool must be true to permit execution;
-    // overwrite replaces the tool call with the rewritten command.
+    // agy PreToolHookResult: "overwrite" replaces the tool call and implicitly
+    // allows it. Do NOT include "allowTool" — it overrides the overwrite.
     let output = json!({
-        "allowTool": true,
         "overwrite": {
             "name": tool_name,
             "args": { field: rewritten.clone() }
@@ -708,12 +707,11 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
         args
     };
 
-    // agy PreToolHookResult: allowTool must be true to permit execution;
-    // overwrite replaces the tool call with the rewritten command.
+    // agy PreToolHookResult: "overwrite" replaces the tool call and implicitly
+    // allows it. Do NOT include "allowTool" — it overrides the overwrite.
     // Mirror the tool name and all args so extra fields (Cwd, WaitMsBeforeAsync, …)
     // are preserved.
     let output = json!({
-        "allowTool": true,
         "overwrite": {
             "name": tool_name,
             "args": updated_args
@@ -1264,7 +1262,10 @@ mod tests {
     fn test_agy_simple_bash_rewrite() {
         let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["allowTool"], true);
+        assert!(
+            v.get("allowTool").is_none(),
+            "allowTool must not appear alongside overwrite"
+        );
         assert_eq!(v["overwrite"]["name"], "Bash");
         assert_eq!(v["overwrite"]["args"]["command"], "rtk git status");
     }
@@ -1273,7 +1274,10 @@ mod tests {
     fn test_agy_simple_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["allowTool"], true);
+        assert!(
+            v.get("allowTool").is_none(),
+            "allowTool must not appear alongside overwrite"
+        );
         assert_eq!(v["overwrite"]["name"], "run_command");
         assert_eq!(v["overwrite"]["args"]["CommandLine"], "rtk git status");
     }
@@ -1304,7 +1308,10 @@ mod tests {
     fn test_agy_rich_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["allowTool"], true);
+        assert!(
+            v.get("allowTool").is_none(),
+            "allowTool must not appear alongside overwrite"
+        );
         assert_eq!(v["overwrite"]["name"], "run_command");
         assert_eq!(v["overwrite"]["args"]["CommandLine"], "rtk git status");
     }
@@ -1313,7 +1320,10 @@ mod tests {
     fn test_agy_rich_bash_rewrite() {
         let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["allowTool"], true);
+        assert!(
+            v.get("allowTool").is_none(),
+            "allowTool must not appear alongside overwrite"
+        );
         assert_eq!(v["overwrite"]["name"], "Bash");
         assert_eq!(v["overwrite"]["args"]["command"], "rtk cargo test");
     }
@@ -1329,7 +1339,10 @@ mod tests {
         .to_string();
         let out = run_antigravity_inner(&input).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["allowTool"], true);
+        assert!(
+            v.get("allowTool").is_none(),
+            "allowTool must not appear alongside overwrite"
+        );
         assert_eq!(v["overwrite"]["name"], "run_command");
         assert_eq!(v["overwrite"]["args"]["Cwd"], "/tmp");
         assert_eq!(v["overwrite"]["args"]["WaitMsBeforeAsync"], 2000);
