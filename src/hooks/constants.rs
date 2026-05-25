@@ -21,6 +21,14 @@ pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+
+pub const ANTIGRAVITY_DIR: &str = ".agents";
+
+/// Native Rust hook command for Google Antigravity CLI (agy).
+pub const ANTIGRAVITY_HOOK_COMMAND: &str = "rtk hook antigravity";
+/// Regex matcher covering both Antigravity shell-execution tool names.
+pub const ANTIGRAVITY_TOOL_MATCHER: &str = "^(run_command|Bash)$";
+
 pub const HERMES_DIR: &str = ".hermes";
 pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
