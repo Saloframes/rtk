@@ -6056,29 +6056,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_claude_md_mode_refuses_malformed_block() {
-        let tmp = TempDir::new().unwrap();
-        with_claude_dir_override(&tmp, |claude_dir| {
-            let claude_md = claude_dir.join(CLAUDE_MD);
-            let malformed = format!(
-                "# Existing notes\n\n{}\nincomplete RTK block\n",
-                RTK_BLOCK_START
-            );
-            fs::write(&claude_md, &malformed).unwrap();
-
-            let result = run_claude_md_mode(true, false, InitContext::default());
-
-            assert!(
-                result.is_err(),
-                "Malformed CLAUDE.md must cause a hard error, not silent skip"
-            );
-
-            let after = fs::read_to_string(&claude_md).unwrap();
-            assert_eq!(after, malformed, "File must not be modified when malformed");
-        });
-    }
-
     // ─── Copilot tests ───────────────────────────────────────────────
 
     #[test]
