@@ -637,8 +637,10 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
         }
     };
 
-    // agy PreToolHookResult: use "overwrite" to replace the tool call.
+    // agy PreToolHookResult: allowTool must be true to permit execution;
+    // overwrite replaces the tool call with the rewritten command.
     let output = json!({
+        "allowTool": true,
         "overwrite": {
             "name": tool_name,
             "args": { field: rewritten.clone() }
@@ -706,10 +708,12 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
         args
     };
 
-    // agy PreToolHookResult: use "overwrite" (HookToolCall) to replace the call.
+    // agy PreToolHookResult: allowTool must be true to permit execution;
+    // overwrite replaces the tool call with the rewritten command.
     // Mirror the tool name and all args so extra fields (Cwd, WaitMsBeforeAsync, …)
     // are preserved.
     let output = json!({
+        "allowTool": true,
         "overwrite": {
             "name": tool_name,
             "args": updated_args
@@ -728,13 +732,13 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
 /// Reads a JSON payload from stdin, rewrites shell commands through RTK,
 /// and outputs the result as a PreToolHookResult protojson.
 ///
-/// IMPORTANT: agy interprets empty stdout as "deny" — always output at
-/// least `{}` (allow, no modification) so non-shell tools are not blocked.
+/// IMPORTANT: agy's PreToolHookResult.allow_tool defaults to false (deny).
+/// Every response must include `{"allowTool": true}` to permit the tool.
+/// `{}` is NOT an allow — it's an implicit deny.
 pub fn run_antigravity() -> Result<()> {
     let input = read_stdin_limited()?;
     let input = input.trim();
     if input.is_empty() {
-        // No payload — nothing to process, nothing to allow.
         return Ok(());
     }
 
@@ -742,8 +746,8 @@ pub fn run_antigravity() -> Result<()> {
         Ok(v) => v,
         Err(e) => {
             let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
-            // Still output allow so a parse error doesn't block the tool.
-            let _ = writeln!(io::stdout(), "{{}}");
+            // Parse error — allow the tool so the user isn't blocked.
+            let _ = writeln!(io::stdout(), r#"{{"allowTool":true}}"#);
             return Ok(());
         }
     };
@@ -759,12 +763,12 @@ pub fn run_antigravity() -> Result<()> {
         }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
-            // No rewrite needed — allow unchanged.
-            let _ = writeln!(io::stdout(), "{{}}");
+            // No rewrite needed — allow the original tool call unchanged.
+            let _ = writeln!(io::stdout(), r#"{{"allowTool":true}}"#);
         }
         PayloadAction::Ignore => {
             // Non-shell tool — allow unchanged.
-            let _ = writeln!(io::stdout(), "{{}}");
+            let _ = writeln!(io::stdout(), r#"{{"allowTool":true}}"#);
         }
     }
 
@@ -1260,6 +1264,7 @@ mod tests {
     fn test_agy_simple_bash_rewrite() {
         let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["allowTool"], true);
         assert_eq!(v["overwrite"]["name"], "Bash");
         assert_eq!(v["overwrite"]["args"]["command"], "rtk git status");
     }
@@ -1268,6 +1273,7 @@ mod tests {
     fn test_agy_simple_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["allowTool"], true);
         assert_eq!(v["overwrite"]["name"], "run_command");
         assert_eq!(v["overwrite"]["args"]["CommandLine"], "rtk git status");
     }
@@ -1298,6 +1304,7 @@ mod tests {
     fn test_agy_rich_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["allowTool"], true);
         assert_eq!(v["overwrite"]["name"], "run_command");
         assert_eq!(v["overwrite"]["args"]["CommandLine"], "rtk git status");
     }
@@ -1306,6 +1313,7 @@ mod tests {
     fn test_agy_rich_bash_rewrite() {
         let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["allowTool"], true);
         assert_eq!(v["overwrite"]["name"], "Bash");
         assert_eq!(v["overwrite"]["args"]["command"], "rtk cargo test");
     }
@@ -1321,6 +1329,7 @@ mod tests {
         .to_string();
         let out = run_antigravity_inner(&input).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["allowTool"], true);
         assert_eq!(v["overwrite"]["name"], "run_command");
         assert_eq!(v["overwrite"]["args"]["Cwd"], "/tmp");
         assert_eq!(v["overwrite"]["args"]["WaitMsBeforeAsync"], 2000);
