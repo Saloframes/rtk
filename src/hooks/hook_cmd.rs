@@ -636,6 +636,7 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
     };
 
     let output = json!({
+        "allowTool": true,
         "overwrite": {
             "name": tool_name,
             "args": { arg_key: rewritten }
@@ -699,6 +700,7 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
     }
 
     let output = json!({
+        "allowTool": true,
         "overwrite": {
             "name": tool_name,
             "args": updated_args
@@ -1267,6 +1269,7 @@ mod tests {
         let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        assert_eq!(v["allowTool"], true, "allowTool must be true to permit the rewrite");
         let ow = &v["overwrite"];
         assert_eq!(ow["name"].as_str().unwrap(), "Bash");
         assert_eq!(ow["args"]["command"].as_str().unwrap(), "rtk git status");
@@ -1277,6 +1280,7 @@ mod tests {
         let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        assert_eq!(v["allowTool"], true, "allowTool must be true to permit the rewrite");
         let ow = &v["overwrite"];
         assert_eq!(ow["name"].as_str().unwrap(), "run_command");
         assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
@@ -1309,6 +1313,7 @@ mod tests {
         let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        assert_eq!(v["allowTool"], true);
         let ow = &v["overwrite"];
         assert_eq!(ow["name"].as_str().unwrap(), "run_command");
         assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
@@ -1319,6 +1324,7 @@ mod tests {
         let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
+        assert_eq!(v["allowTool"], true);
         let ow = &v["overwrite"];
         assert_eq!(ow["name"].as_str().unwrap(), "Bash");
         assert_eq!(ow["args"]["command"].as_str().unwrap(), "rtk cargo test");
