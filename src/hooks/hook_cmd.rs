@@ -764,6 +764,7 @@ pub fn run_antigravity() -> Result<()> {
         let _ = (|| -> Option<()> {
             let dir = dirs::home_dir()?.join(".local").join("share").join("rtk");
             let mut f = std::fs::OpenOptions::new()
+                .create(true)
                 .append(true)
                 .open(dir.join("agy-hook-debug.log"))
                 .ok()?;
@@ -1266,18 +1267,30 @@ mod tests {
     fn test_agy_simple_bash_rewrite() {
         let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        assert!(
+            v.get("overwrite").is_none(),
+            "overwrite is silently ignored by agy"
+        );
         let reason = v["denyReason"].as_str().unwrap();
-        assert!(reason.contains("rtk git status"), "deny reason must name the replacement: {reason}");
+        assert!(
+            reason.contains("rtk git status"),
+            "deny reason must name the replacement: {reason}"
+        );
     }
 
     #[test]
     fn test_agy_simple_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        assert!(
+            v.get("overwrite").is_none(),
+            "overwrite is silently ignored by agy"
+        );
         let reason = v["denyReason"].as_str().unwrap();
-        assert!(reason.contains("rtk git status"), "deny reason must name the replacement: {reason}");
+        assert!(
+            reason.contains("rtk git status"),
+            "deny reason must name the replacement: {reason}"
+        );
     }
 
     #[test]
@@ -1306,7 +1319,10 @@ mod tests {
     fn test_agy_rich_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        assert!(
+            v.get("overwrite").is_none(),
+            "overwrite is silently ignored by agy"
+        );
         let reason = v["denyReason"].as_str().unwrap();
         assert!(reason.contains("rtk git status"), "deny reason: {reason}");
     }
@@ -1315,7 +1331,10 @@ mod tests {
     fn test_agy_rich_bash_rewrite() {
         let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        assert!(
+            v.get("overwrite").is_none(),
+            "overwrite is silently ignored by agy"
+        );
         let reason = v["denyReason"].as_str().unwrap();
         assert!(reason.contains("rtk cargo test"), "deny reason: {reason}");
     }

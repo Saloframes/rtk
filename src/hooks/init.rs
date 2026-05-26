@@ -1773,7 +1773,7 @@ pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
         .context("Failed to resolve rtk binary path")?
         .to_string_lossy()
         .to_string();
-    let hook_command = format!("{} hook antigravity", rtk_bin);
+    let hook_command = format!("\"{}\" hook antigravity", rtk_bin);
 
     let config_dir = resolve_agy_config_dir()?;
     let hooks_path = config_dir.join(HOOKS_JSON);
@@ -1824,7 +1824,12 @@ fn grant_agy_rtk_permission(path: &Path, dry_run: bool, verbose: u8) -> Result<b
     let mut settings: serde_json::Value = if path.exists() {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        serde_json::from_str(&content).with_context(|| {
+            format!(
+                "agy settings.json is not valid JSON: {}. Fix or remove it and retry.",
+                path.display()
+            )
+        })?
     } else {
         serde_json::json!({})
     };
@@ -1939,7 +1944,12 @@ fn patch_agy_hooks_json(path: &Path, ctx: InitContext, hook_command: &str) -> Re
     let mut hooks: serde_json::Value = if path.exists() {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        serde_json::from_str(&content).with_context(|| {
+            format!(
+                "agy hooks.json is not valid JSON: {}. Fix or remove it and retry.",
+                path.display()
+            )
+        })?
     } else {
         serde_json::json!({})
     };
@@ -2022,7 +2032,7 @@ fn insert_agy_hook_entry(hooks: &mut serde_json::Value, hook_command: &str) -> R
             "enabled": true,
             "PreToolUse": [
                 {
-                    "toolNameMatcher": "^(run_command|Bash)$",
+                    "toolNameMatcher": "^(run_command|Bash|bash)$",
                     "hooks": [{"type": "command", "command": hook_command}]
                 }
             ]
@@ -6260,5 +6270,126 @@ mod tests {
             let after = fs::read_to_string(&claude_md).unwrap();
             assert_eq!(after, malformed, "File must not be modified when malformed");
         });
+    }
+
+    // ── agy install/uninstall tests ───────────────────────────────────────────
+
+    fn make_tmp() -> TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    #[test]
+    fn test_patch_agy_hooks_json_creates_file_when_missing() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("hooks.json");
+        let patched = patch_agy_hooks_json(
+            &path,
+            InitContext::default(),
+            "/usr/bin/rtk hook antigravity",
+        )
+        .unwrap();
+        assert!(patched, "should return true when file is created");
+        let content = fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            v.get("rtk-antigravity").is_some(),
+            "hook entry must be written"
+        );
+    }
+
+    #[test]
+    fn test_patch_agy_hooks_json_noop_when_already_present() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("hooks.json");
+        let cmd = "/usr/bin/rtk hook antigravity";
+        patch_agy_hooks_json(&path, InitContext::default(), cmd).unwrap();
+        let patched = patch_agy_hooks_json(&path, InitContext::default(), cmd).unwrap();
+        assert!(!patched, "second call with same command must be a no-op");
+    }
+
+    #[test]
+    fn test_patch_agy_hooks_json_errors_on_invalid_json() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("hooks.json");
+        fs::write(&path, "not json at all").unwrap();
+        let result = patch_agy_hooks_json(
+            &path,
+            InitContext::default(),
+            "/usr/bin/rtk hook antigravity",
+        );
+        assert!(
+            result.is_err(),
+            "corrupt hooks.json must produce an error, not silent overwrite"
+        );
+        let original = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            original, "not json at all",
+            "corrupt file must not be modified"
+        );
+    }
+
+    #[test]
+    fn test_grant_agy_rtk_permission_creates_file_when_missing() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("settings.json");
+        let granted = grant_agy_rtk_permission(&path, false, 0).unwrap();
+        assert!(granted);
+        let content = fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let allow = v
+            .pointer("/permissions/allow")
+            .and_then(|a| a.as_array())
+            .unwrap();
+        assert!(allow.iter().any(|e| e.as_str() == Some(AGY_RTK_PERMISSION)));
+    }
+
+    #[test]
+    fn test_grant_agy_rtk_permission_idempotent() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("settings.json");
+        grant_agy_rtk_permission(&path, false, 0).unwrap();
+        let granted = grant_agy_rtk_permission(&path, false, 0).unwrap();
+        assert!(!granted, "second grant must be a no-op");
+    }
+
+    #[test]
+    fn test_grant_agy_rtk_permission_errors_on_invalid_json() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("settings.json");
+        fs::write(&path, "{bad json}").unwrap();
+        let result = grant_agy_rtk_permission(&path, false, 0);
+        assert!(
+            result.is_err(),
+            "corrupt settings.json must produce an error"
+        );
+        let original = fs::read_to_string(&path).unwrap();
+        assert_eq!(original, "{bad json}", "corrupt file must not be modified");
+    }
+
+    #[test]
+    fn test_revoke_agy_rtk_permission_idempotent() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("settings.json");
+        // Nothing to revoke — missing file is a no-op.
+        let revoked = revoke_agy_rtk_permission(&path, false, 0).unwrap();
+        assert!(!revoked);
+        // Grant then revoke then revoke again.
+        grant_agy_rtk_permission(&path, false, 0).unwrap();
+        let revoked = revoke_agy_rtk_permission(&path, false, 0).unwrap();
+        assert!(revoked);
+        let revoked = revoke_agy_rtk_permission(&path, false, 0).unwrap();
+        assert!(!revoked, "second revoke must be a no-op");
+    }
+
+    #[test]
+    fn test_agy_hook_tool_name_matcher_includes_bash_lowercase() {
+        let tmp = make_tmp();
+        let path = tmp.path().join("hooks.json");
+        patch_agy_hooks_json(&path, InitContext::default(), "/rtk hook antigravity").unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("bash"),
+            "toolNameMatcher must include lowercase 'bash'"
+        );
     }
 }

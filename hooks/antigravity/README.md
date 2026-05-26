@@ -10,45 +10,44 @@ RTK supports two separate Google Antigravity integrations:
 
 The `agy` CLI (successor to Gemini CLI) supports a JSON hook protocol.  RTK registers as a `PreToolUse` hook that rewrites shell commands before execution.
 
-**Install (global):**
+**Install (global only):**
 ```bash
 rtk init -g --agent agy
 ```
 
-**Install (project-local):**
-```bash
-rtk init --agent agy
-```
+agy CLI hook support is **global-only** — there is no project-local install. The hook runner is registered system-wide so it intercepts all agy sessions.
 
-**Hook location:**
-- Global: `~/.agents/hooks.json`
-- Project: `.agents/hooks.json`
+**Files written:**
+- `~/.gemini/config/hooks.json` — registers the `PreToolUse` hook
+- `~/.gemini/antigravity-cli/settings.json` — grants `command(rtk)` permission
 
-**Hook entry written:**
+**Hook entry written to `~/.gemini/config/hooks.json`:**
 ```json
 {
-  "hooks": {
+  "rtk-antigravity": {
+    "enabled": true,
     "PreToolUse": [
       {
-        "type": "command",
-        "command": "rtk hook antigravity",
-        "toolNameMatcher": "^(run_command|Bash)$"
+        "toolNameMatcher": "^(run_command|Bash|bash)$",
+        "hooks": [{"type": "command", "command": "/path/to/rtk hook antigravity"}]
       }
     ]
   }
 }
 ```
 
-**JSON protocol:**
+**Hook protocol:**
+
+agy sends a JSON payload to stdin; the hook replies to stdout.
 
 Input (`run_command` tool):
 ```json
 {"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}
 ```
 
-Output (rewritten):
+Output — deny with replacement name (model retries with `rtk git status`, auto-approved via `command(rtk)` allow entry):
 ```json
-{"decision": "allow", "toolCall": {"args": {"CommandLine": "rtk git status"}}}
+{"denyReason": "RTK: use 'rtk git status' instead of 'git status' (60-90% token savings)"}
 ```
 
 Input (`Bash` tool):
@@ -56,17 +55,13 @@ Input (`Bash` tool):
 {"toolCall": {"name": "Bash", "args": {"command": "cargo test"}}}
 ```
 
-Output (rewritten):
-```json
-{"decision": "allow", "toolCall": {"args": {"command": "rtk cargo test"}}}
-```
+Non-shell tools and commands already prefixed with `rtk` receive `{"allowTool": true}` and pass through unchanged.
 
-No output is produced for non-shell tools or commands that don't match any RTK filter — the tool runs unchanged.
+> **Note:** agy's `overwrite` field in `PreToolHookResult` is silently ignored regardless of `toolPermission` mode. RTK uses the deny-and-retry pattern as a workaround until `overwrite` is implemented by agy.
 
 **Uninstall:**
 ```bash
-rtk init --uninstall --agent agy          # project-local
-rtk init -g --uninstall --agent agy       # global
+rtk init -g --uninstall --agent agy
 ```
 
 ### 2. Antigravity IDE — Prompt-Level Guidance
