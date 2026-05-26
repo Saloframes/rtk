@@ -597,19 +597,15 @@ fn process_antigravity_payload(v: &Value) -> PayloadAction {
 }
 
 fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
-    let (cmd, arg_key) = match tool_name {
-        "run_command" => (
-            v.pointer("/tool_input/CommandLine")
-                .and_then(|c| c.as_str())
-                .unwrap_or(""),
-            "CommandLine",
-        ),
-        "Bash" | "bash" => (
-            v.pointer("/tool_input/command")
-                .and_then(|c| c.as_str())
-                .unwrap_or(""),
-            "command",
-        ),
+    let cmd = match tool_name {
+        "run_command" => v
+            .pointer("/tool_input/CommandLine")
+            .and_then(|c| c.as_str())
+            .unwrap_or(""),
+        "Bash" | "bash" => v
+            .pointer("/tool_input/command")
+            .and_then(|c| c.as_str())
+            .unwrap_or(""),
         _ => return PayloadAction::Ignore,
     };
 
@@ -635,12 +631,14 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
         }
     };
 
+    // agy's `overwrite` field in PreToolHookResult is silently ignored (confirmed
+    // via RTK_HOOK_DEBUG: correct payload sent, original command executed anyway).
+    // denyReason is the only hook mechanism agy actually implements.
     let output = json!({
-        "allowTool": true,
-        "overwrite": {
-            "name": tool_name,
-            "args": { arg_key: rewritten }
-        }
+        "denyReason": format!(
+            "RTK: use '{}' instead of '{}' (60-90% token savings)",
+            rewritten, cmd
+        )
     });
 
     PayloadAction::Rewrite {
@@ -651,19 +649,15 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
 }
 
 fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
-    let (cmd, arg_key) = match tool_name {
-        "run_command" => (
-            v.pointer("/toolCall/args/CommandLine")
-                .and_then(|c| c.as_str())
-                .unwrap_or(""),
-            "CommandLine",
-        ),
-        "Bash" | "bash" => (
-            v.pointer("/toolCall/args/command")
-                .and_then(|c| c.as_str())
-                .unwrap_or(""),
-            "command",
-        ),
+    let cmd = match tool_name {
+        "run_command" => v
+            .pointer("/toolCall/args/CommandLine")
+            .and_then(|c| c.as_str())
+            .unwrap_or(""),
+        "Bash" | "bash" => v
+            .pointer("/toolCall/args/command")
+            .and_then(|c| c.as_str())
+            .unwrap_or(""),
         _ => return PayloadAction::Ignore,
     };
 
@@ -689,22 +683,12 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
         }
     };
 
-    // Preserve extra metadata fields (Cwd, WaitMsBeforeAsync, etc.) from the
-    // original args; only replace the command string itself.
-    let mut updated_args = v
-        .pointer("/toolCall/args")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    if let Some(obj) = updated_args.as_object_mut() {
-        obj.insert(arg_key.to_string(), Value::String(rewritten.clone()));
-    }
-
+    // agy's `overwrite` field is silently ignored — only denyReason works.
     let output = json!({
-        "allowTool": true,
-        "overwrite": {
-            "name": tool_name,
-            "args": updated_args
-        }
+        "denyReason": format!(
+            "RTK: use '{}' instead of '{}' (60-90% token savings)",
+            rewritten, cmd
+        )
     });
 
     PayloadAction::Rewrite {
@@ -718,11 +702,13 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
 ///
 /// Reads a JSON payload from stdin and outputs a PreToolHookResult protojson.
 ///
-/// Strategy: rewrite the command in-place using the `overwrite` field
-/// (PreToolHookResult.overwrite). Under `toolPermission=always-proceed` this
-/// is transparent — no ⚠ warning, no extra LLM call. Under `request-review`
-/// the review fires on the original binary so RTK is bypassed for that turn,
-/// but the user is not blocked.
+/// Strategy: deny commands that need rewriting with a `denyReason` naming the
+/// rtk-prefixed replacement. The model retries with that command, which agy
+/// auto-approves via `command(rtk)` in the allow list.
+///
+/// NOTE: The `overwrite` field in PreToolHookResult is silently ignored by agy
+/// regardless of permission mode — confirmed via debug logging. Only
+/// `allowTool` and `denyReason` are honored.
 pub fn run_antigravity() -> Result<()> {
     let input = read_stdin_limited()?;
     let input = input.trim();
@@ -756,25 +742,37 @@ pub fn run_antigravity() -> Result<()> {
         }
     };
 
-    match process_antigravity_payload(&v) {
+    let debug = std::env::var("RTK_HOOK_DEBUG").as_deref() == Ok("1");
+
+    let response = match process_antigravity_payload(&v) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
             output,
         } => {
             audit_log("rewrite", &cmd, &rewritten);
-            let _ = writeln!(io::stdout(), "{output}");
+            output.to_string()
         }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
-            // No rewrite needed — allow the original tool call unchanged.
-            let _ = writeln!(io::stdout(), r#"{{"allowTool":true}}"#);
+            r#"{"allowTool":true}"#.to_string()
         }
-        PayloadAction::Ignore => {
-            // Non-shell tool — allow unchanged.
-            let _ = writeln!(io::stdout(), r#"{{"allowTool":true}}"#);
-        }
+        PayloadAction::Ignore => r#"{"allowTool":true}"#.to_string(),
+    };
+
+    if debug {
+        let _ = (|| -> Option<()> {
+            let dir = dirs::home_dir()?.join(".local").join("share").join("rtk");
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.join("agy-hook-debug.log"))
+                .ok()?;
+            let _ = writeln!(f, ">>> {}\n", response);
+            Some(())
+        })();
     }
+
+    let _ = writeln!(io::stdout(), "{response}");
 
     Ok(())
 }
@@ -1268,22 +1266,18 @@ mod tests {
     fn test_agy_simple_bash_rewrite() {
         let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
-        assert_eq!(v["allowTool"], true, "allowTool must be true to permit the rewrite");
-        let ow = &v["overwrite"];
-        assert_eq!(ow["name"].as_str().unwrap(), "Bash");
-        assert_eq!(ow["args"]["command"].as_str().unwrap(), "rtk git status");
+        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        let reason = v["denyReason"].as_str().unwrap();
+        assert!(reason.contains("rtk git status"), "deny reason must name the replacement: {reason}");
     }
 
     #[test]
     fn test_agy_simple_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
-        assert_eq!(v["allowTool"], true, "allowTool must be true to permit the rewrite");
-        let ow = &v["overwrite"];
-        assert_eq!(ow["name"].as_str().unwrap(), "run_command");
-        assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
+        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        let reason = v["denyReason"].as_str().unwrap();
+        assert!(reason.contains("rtk git status"), "deny reason must name the replacement: {reason}");
     }
 
     #[test]
@@ -1312,26 +1306,22 @@ mod tests {
     fn test_agy_rich_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
-        assert_eq!(v["allowTool"], true);
-        let ow = &v["overwrite"];
-        assert_eq!(ow["name"].as_str().unwrap(), "run_command");
-        assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
+        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        let reason = v["denyReason"].as_str().unwrap();
+        assert!(reason.contains("rtk git status"), "deny reason: {reason}");
     }
 
     #[test]
     fn test_agy_rich_bash_rewrite() {
         let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("denyReason").is_none(), "must use overwrite, not denyReason");
-        assert_eq!(v["allowTool"], true);
-        let ow = &v["overwrite"];
-        assert_eq!(ow["name"].as_str().unwrap(), "Bash");
-        assert_eq!(ow["args"]["command"].as_str().unwrap(), "rtk cargo test");
+        assert!(v.get("overwrite").is_none(), "overwrite is silently ignored by agy");
+        let reason = v["denyReason"].as_str().unwrap();
+        assert!(reason.contains("rtk cargo test"), "deny reason: {reason}");
     }
 
     #[test]
-    fn test_agy_rich_overwrite_preserves_extra_args() {
+    fn test_agy_rich_deny_reason_names_replacement() {
         let input = json!({
             "toolCall": {
                 "name": "run_command",
@@ -1341,11 +1331,9 @@ mod tests {
         .to_string();
         let out = run_antigravity_inner(&input).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert!(v.get("denyReason").is_none());
-        let ow = &v["overwrite"];
-        assert_eq!(ow["args"]["CommandLine"].as_str().unwrap(), "rtk git status");
-        assert_eq!(ow["args"]["Cwd"].as_str().unwrap(), "/tmp");
-        assert_eq!(ow["args"]["WaitMsBeforeAsync"].as_i64().unwrap(), 2000);
+        assert!(v.get("overwrite").is_none());
+        let reason = v["denyReason"].as_str().unwrap();
+        assert!(reason.contains("rtk git status"), "deny reason: {reason}");
     }
 
     #[test]
