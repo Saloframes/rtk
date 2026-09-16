@@ -1432,6 +1432,7 @@ failed:
 
     #[test]
     fn caps_noisy_failure_output_head_and_tail() {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let input =
             include_str!("../../../tests/fixtures/ctest_noisy_fail_output_on_failure_raw.txt");
         let filtered = filter_ctest_output(input);
@@ -1677,6 +1678,7 @@ some unrelated tail
 
     #[test]
     fn caps_failed_test_entries_with_one_complete_section_tee() {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let mut input = String::from("Test project /tmp/build\n");
         for number in 1..=25 {
             input.push_str(&format!(
@@ -1732,6 +1734,7 @@ some unrelated tail
 
     #[test]
     fn caps_unparsed_raw_failed_entries_with_recovery_hint() {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let mut input = String::from(
             "Test project /tmp/build\n\n0% tests passed, 25 tests failed out of 25\n\nThe following tests FAILED:\n",
         );
@@ -1767,6 +1770,7 @@ some unrelated tail
 
     #[test]
     fn caps_skipped_test_entries_with_recovery_hint() {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let mut input = String::from("Test project /tmp/build\n");
         for number in 1..=25 {
             input.push_str(&format!(

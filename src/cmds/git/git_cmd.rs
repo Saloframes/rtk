@@ -34,6 +34,57 @@ pub enum GitCommand {
     Worktree,
 }
 
+impl GitCommand {
+    /// The git subcommand this arm runs, as the user would type it.
+    fn name(&self) -> &'static str {
+        match self {
+            GitCommand::Diff => "diff",
+            GitCommand::Log => "log",
+            GitCommand::Status => "status",
+            GitCommand::Show => "show",
+            GitCommand::Add => "add",
+            GitCommand::Commit => "commit",
+            GitCommand::Checkout => "checkout",
+            GitCommand::Push => "push",
+            GitCommand::Pull => "pull",
+            GitCommand::Branch => "branch",
+            GitCommand::Fetch => "fetch",
+            GitCommand::Stash { .. } => "stash",
+            GitCommand::Worktree => "worktree",
+        }
+    }
+
+    /// Everything the user typed after the subcommand, in order. `Stash`
+    /// parses its first operand into its own positional, so it is put back
+    /// in front of `args`: `restore_double_dash` measures the user region by
+    /// length, and a `--` before that operand (`git stash -- -h`) would
+    /// otherwise be lost.
+    fn user_args(&self, args: &[String]) -> Vec<String> {
+        match self {
+            GitCommand::Stash {
+                subcommand: Some(sub),
+            } => std::iter::once(sub.clone())
+                .chain(args.iter().cloned())
+                .collect(),
+            _ => args.to_vec(),
+        }
+    }
+}
+
+/// `-h` or `--help` before any `--` asks git for the subcommand's usage. git
+/// prints it on stdout with exit 129 (or opens the manual), and every filter
+/// here reads stdout as the subcommand's normal output: `git worktree -h`
+/// listed worktrees, `git show -h` printed nothing. Such a call is not a
+/// filtering job, so it runs through the passthrough unchanged.
+///
+/// Callers pass the args with clap's stripped `--` restored
+/// (`args_utils::restore_double_dash`): `git log -- -h` names a pathspec.
+fn requests_help(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "-h" || arg == "--help")
+}
+
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
 /// prepended before any subcommand arguments.
 fn git_cmd(global_args: &[String]) -> Command {
@@ -42,6 +93,18 @@ fn git_cmd(global_args: &[String]) -> Command {
         cmd.arg(arg);
     }
     cmd
+}
+
+/// Append pathspecs to a `git add` invocation.
+///
+/// A bare `git add` gets no pathspec at all: real git treats it as a
+/// deliberate no-op ("Nothing specified, nothing added."). Adding `.`
+/// implicitly would stage the whole working tree from a command the user
+/// aimed at nothing in particular. Regression test for rtk issue #3408.
+fn append_add_pathspecs(cmd: &mut Command, args: &[String]) {
+    for arg in args {
+        cmd.arg(arg);
+    }
 }
 
 /// Create a git Command for internal parsing that must be locale-stable.
@@ -81,6 +144,44 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch || !saw_flag
 }
 
+fn status_args_request_machine_output(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "-z" || arg == "--porcelain" || arg.starts_with("--porcelain="))
+}
+
+fn log_args_request_machine_output(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(idx, arg)| {
+        // `-z` NUL-delimits records for programmatic consumers, independently of
+        // any --format/--pretty flag: `git log -z --name-only` is machine output
+        // with no custom format at all.
+        arg == "-z"
+            || arg == "--format"
+            || arg.starts_with("--format=")
+            || arg.starts_with("--pretty=format:")
+            || arg.starts_with("--pretty=tformat:")
+            || (arg == "--pretty"
+                && args
+                    .get(idx + 1)
+                    .is_some_and(|next| next.starts_with("format:") || next.starts_with("tformat:")))
+    })
+}
+
+fn diff_args_request_machine_output(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-z"
+                | "--name-only"
+                | "--name-status"
+                | "--numstat"
+                | "--raw"
+                // `--word-diff=porcelain` is the machine-readable word-diff; the
+                // plain/color variants are for humans, so they stay compacted.
+                | "--word-diff=porcelain"
+        )
+    })
+}
+
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
@@ -114,6 +215,14 @@ pub fn run(
         other => (other, args_utils::restore_double_dash(args)),
     };
     let args = &args;
+
+    let user_args = cmd.user_args(args);
+    if requests_help(&user_args) {
+        let raw: Vec<OsString> = std::iter::once(OsString::from(cmd.name()))
+            .chain(user_args.iter().map(OsString::from))
+            .collect();
+        return run_passthrough(&raw, global_args, verbose);
+    }
     match cmd {
         GitCommand::Diff => run_diff(args, max_lines, verbose, global_args),
         GitCommand::Log => run_log(args, max_lines, verbose, global_args),
@@ -279,8 +388,9 @@ fn run_diff(
         .map(|t| t.source_index)
         .collect();
     let wants_compact = no_compact.is_empty() && !emits_word_diff(&tokens);
+    let wants_machine_output = diff_args_request_machine_output(args);
 
-    if wants_stat || !wants_compact {
+    if wants_machine_output || wants_stat || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
@@ -310,6 +420,7 @@ fn run_diff(
             );
             return Ok(result.exit_code);
         }
+
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
@@ -1525,6 +1636,16 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
         result.push(format!("  +{} -{}", added, removed));
     }
 
+    // Nothing was ever pushed, so no `diff --git` and no `@@` was seen: this is not
+    // unified diff. Returning the empty join here would silently drop the whole diff
+    // while the surrounding stat summary still looks authoritative. Fall back to the
+    // raw text instead, and let `never_worse()` at the call site pick the cheaper of
+    // the two. Reachable whenever an external diff driver is configured, and for the
+    // `gh` / `glab` callers, which have no equivalent flag.
+    if result.is_empty() && !diff.trim().is_empty() {
+        return diff.to_string();
+    }
+
     if was_truncated {
         result.push("[full diff: rtk git diff --no-compact]".to_string());
     }
@@ -1634,6 +1755,29 @@ fn run_log(
     }
 
     let timer = tracking::TimedExecution::start();
+
+    if log_args_request_machine_output(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("log");
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        if !result.success() {
+            eprintln!("{}", result.stderr);
+            return Ok(result.exit_code);
+        }
+
+        print!("{}", result.stdout);
+
+        timer.track_passthrough(
+            &format!("git log {}", args.join(" ")),
+            &format!("rtk git log {} (passthrough)", args.join(" ")),
+        );
+
+        return Ok(0);
+    }
 
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
@@ -2216,8 +2360,59 @@ fn filter_status_with_args(output: &str) -> String {
     }
 }
 
+/// Ensure filtered output ends with exactly one trailing newline, matching git.
+///
+/// `filter_status_with_args` joins its kept lines with `\n` and therefore has no
+/// terminal newline, while `never_worse` may hand back git's raw stdout, which
+/// does. Printing either verbatim is wrong in one of the two cases: the joined
+/// form glues its last entry to whatever prints next, so
+/// `rtk git status -s | wc -l` undercounts by one — reporting `0`, i.e.
+/// "clean", on a tree with a single change. (`--porcelain` and `-z` never
+/// reach this path: `status_args_request_machine_output` passes them
+/// through raw above.)
+///
+/// Empty output is left empty: `-s` on a clean tree prints nothing at all,
+/// and a lone newline there would be a different fidelity bug.
+fn with_trailing_newline(output: &str) -> String {
+    if output.is_empty() || output.ends_with('\n') {
+        output.to_string()
+    } else {
+        format!("{}\n", output)
+    }
+}
+
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    if status_args_request_machine_output(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("status");
+        cmd.args(args);
+        let result = exec_capture(&mut cmd).context("Failed to run git status")?;
+
+        if !result.success() {
+            if !result.stderr.trim().is_empty() {
+                eprint!("{}", result.stderr);
+            }
+            timer.track_passthrough(
+                &format!("git status {}", args.join(" ")),
+                &format!("rtk git status {} (passthrough)", args.join(" ")),
+            );
+            return Ok(result.exit_code);
+        }
+
+        if verbose > 0 || !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        print!("{}", result.stdout);
+
+        timer.track_passthrough(
+            &format!("git status {}", args.join(" ")),
+            &format!("rtk git status {} (passthrough)", args.join(" ")),
+        );
+
+        return Ok(0);
+    }
 
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
@@ -2244,7 +2439,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         // Apply minimal filtering: strip ANSI, remove hints, empty lines
         let filtered = filter_status_with_args(&result.stdout);
-        let filtered = never_worse(&result.stdout, &filtered).to_string();
+        let filtered = with_trailing_newline(never_worse(&result.stdout, &filtered));
         print!("{}", filtered);
 
         timer.track(
@@ -2329,14 +2524,11 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
     let mut cmd = git_cmd(global_args);
     cmd.arg("add");
 
-    // Pass all arguments directly to git (flags like -A, -p, --all, etc.)
-    if args.is_empty() {
-        cmd.arg(".");
-    } else {
-        for arg in args {
-            cmd.arg(arg);
-        }
-    }
+    // Pass all arguments directly to git (flags like -A, -p, --all, etc.).
+    // A bare `git add` receives no pathspec: real git treats it as a
+    // deliberate no-op ("Nothing specified, nothing added."), and staging '.'
+    // implicitly would stage the whole worktree. See rtk issue #3408.
+    append_add_pathspecs(&mut cmd, args);
 
     let result = exec_capture(&mut cmd).context("Failed to run git add")?;
 
@@ -3644,6 +3836,48 @@ mod tests {
     }
 
     #[test]
+    fn test_requests_help_before_double_dash_only() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(requests_help(&a(&["-h"])));
+        assert!(requests_help(&a(&["--oneline", "--help"])));
+        assert!(!requests_help(&a(&[])));
+        assert!(!requests_help(&a(&["--oneline", "-5"])));
+        // After `--` it is a pathspec, not a request for usage.
+        assert!(!requests_help(&a(&["--", "-h"])));
+        assert!(!requests_help(&a(&["--", "--help"])));
+    }
+
+    #[test]
+    fn test_stash_operand_rejoins_the_user_region_before_restoring_double_dash() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // `rtk git stash -- -h`: clap put `-h` in `subcommand`, args is empty.
+        let cmd = GitCommand::Stash {
+            subcommand: Some("-h".to_string()),
+        };
+        let raw = a(&["rtk", "git", "stash", "--", "-h"]);
+        let restored = args_utils::restore_double_dash_with_raw(&cmd.user_args(&[]), &raw);
+        assert_eq!(restored, a(&["--", "-h"]));
+        assert!(!requests_help(&restored), "`-- -h` is an operand, not help");
+        // Without the operand the region is one short and the `--` is lost.
+        assert_eq!(
+            args_utils::restore_double_dash_with_raw(&[], &raw),
+            a(&["-h"])
+        );
+        // `rtk git stash list -h` still asks for usage.
+        let cmd = GitCommand::Stash {
+            subcommand: Some("list".to_string()),
+        };
+        assert!(requests_help(&cmd.user_args(&a(&["-h"]))));
+    }
+
+    #[test]
+    fn test_git_command_names_match_the_subcommand() {
+        assert_eq!(GitCommand::Log.name(), "log");
+        assert_eq!(GitCommand::Stash { subcommand: None }.name(), "stash");
+        assert_eq!(GitCommand::Worktree.name(), "worktree");
+    }
+
+    #[test]
     fn test_git_cmd_no_global_args() {
         let cmd = git_cmd(&[]);
         let program = cmd.get_program().to_string_lossy().to_string();
@@ -3656,6 +3890,27 @@ mod tests {
         assert_eq!(basename, "git");
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_add_with_no_args_gets_no_pathspec() {
+        // Regression for #3408: a bare `git add` must stay a no-op and must
+        // never implicitly stage '.'.
+        let mut cmd = git_cmd(&[]);
+        cmd.arg("add");
+        append_add_pathspecs(&mut cmd, &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec!["add"]);
+    }
+
+    #[test]
+    fn test_add_with_args_passes_them_through() {
+        let mut cmd = git_cmd(&[]);
+        cmd.arg("add");
+        let args = vec!["-A".to_string(), "src/main.rs".to_string()];
+        append_add_pathspecs(&mut cmd, &args);
+        let collected: Vec<_> = cmd.get_args().collect();
+        assert_eq!(collected, vec!["add", "-A", "src/main.rs"]);
     }
 
     #[test]
@@ -3715,10 +3970,129 @@ mod tests {
     }
 
     #[test]
+    fn test_git_status_machine_output_args_passthrough() {
+        assert!(status_args_request_machine_output(&["--porcelain".to_string()]));
+        assert!(status_args_request_machine_output(&[
+            "--porcelain=v2".to_string()
+        ]));
+        assert!(status_args_request_machine_output(&["-z".to_string()]));
+        assert!(!status_args_request_machine_output(&["--short".to_string()]));
+    }
+
+    #[test]
+    fn test_git_log_machine_output_args_passthrough() {
+        assert!(log_args_request_machine_output(&["--format=%H".to_string()]));
+        assert!(log_args_request_machine_output(&[
+            "--pretty=format:%H".to_string()
+        ]));
+        assert!(log_args_request_machine_output(&[
+            "--format".to_string(),
+            "%H".to_string()
+        ]));
+        assert!(!log_args_request_machine_output(&["--oneline".to_string()]));
+    }
+
+    #[test]
+    fn test_git_log_z_is_machine_output_without_format_flag() {
+        // `git log -z --name-only` is machine output with no custom format at all.
+        // Before this, -z fell to the compact path, which injects its own
+        // --pretty=format:<MARKER>, -10 and --no-merges and then filters —
+        // exactly the corruption the machine-output guard exists to prevent.
+        assert!(log_args_request_machine_output(&["-z".to_string()]));
+        assert!(log_args_request_machine_output(&[
+            "-z".to_string(),
+            "--name-only".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_git_diff_machine_output_args_passthrough() {
+        for args in [
+            vec!["--name-only".to_string()],
+            vec!["--name-status".to_string()],
+            vec!["--numstat".to_string()],
+            vec!["--raw".to_string()],
+            vec!["--word-diff=porcelain".to_string()],
+            vec!["-z".to_string(), "--name-only".to_string()],
+        ] {
+            assert!(diff_args_request_machine_output(&args), "{args:?}");
+        }
+        assert!(!diff_args_request_machine_output(&[]));
+    }
+
+    #[test]
+    fn test_git_diff_word_diff_only_porcelain_is_machine_output() {
+        // `--word-porcelain` is not a git flag at all (`git diff --word-porcelain`
+        // exits 129); the real machine-readable spelling is `--word-diff=porcelain`.
+        assert!(!diff_args_request_machine_output(&[
+            "--word-porcelain".to_string()
+        ]));
+        assert!(diff_args_request_machine_output(&[
+            "--word-diff=porcelain".to_string()
+        ]));
+        // The human-facing word-diff modes must stay compacted.
+        for human in ["--word-diff=plain", "--word-diff=color", "--word-diff"] {
+            assert!(
+                !diff_args_request_machine_output(&[human.to_string()]),
+                "{human} is for humans and must stay compacted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_git_diff_no_color_is_not_machine_output() {
+        // --no-color only suppresses ANSI; it says nothing about the output format,
+        // so treating it as machine output would disable compaction for free.
+        assert!(!diff_args_request_machine_output(&[
+            "--no-color".to_string()
+        ]));
+    }
+
+    #[test]
     fn test_build_status_command_default_compact() {
         let cmd = build_status_command(&[], &[]);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["status", "--porcelain", "-b"]);
+    }
+
+    #[test]
+    fn with_trailing_newline_appends_when_missing() {
+        assert_eq!(
+            with_trailing_newline(" M tracked.txt\n?? zzz-last.txt"),
+            " M tracked.txt\n?? zzz-last.txt\n"
+        );
+    }
+
+    #[test]
+    fn with_trailing_newline_leaves_existing_newline_alone() {
+        assert_eq!(with_trailing_newline(" M tracked.txt\n"), " M tracked.txt\n");
+    }
+
+    #[test]
+    fn with_trailing_newline_keeps_empty_output_empty() {
+        // `-s` on a clean tree prints nothing; a lone newline would be its
+        // own fidelity bug.
+        assert_eq!(with_trailing_newline(""), "");
+        // Composed with the real pipeline: `filter_status_with_args("")` is
+        // `"ok"`, and only `never_worse`'s tie-break returns git's empty
+        // stdout instead — pin the composition so a clean `git status -s`
+        // never becomes `ok\n`.
+        assert_eq!(
+            with_trailing_newline(never_worse("", &filter_status_with_args(""))),
+            ""
+        );
+    }
+
+    #[test]
+    fn filtered_status_line_count_matches_git() {
+        // The regression this guards: `rtk git status -s | wc -l` reported 0
+        // on a one-file dirty tree, i.e. a false "clean". (`--porcelain` is
+        // machine-output passthrough and never reached this path.)
+        let raw = "?? handoff/\n";
+        let filtered = with_trailing_newline(&filter_status_with_args(raw));
+        // `wc -l` counts newlines, not `str::lines()` items.
+        assert_eq!(filtered.matches('\n').count(), raw.matches('\n').count());
+        assert_eq!(filtered, raw);
     }
 
     #[test]
@@ -4370,6 +4744,36 @@ mod tests {
             "expected per-sign truncation note, got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_compact_diff_passes_through_non_unified_input() {
+        // Real `git diff` output from a repo with `diff.external = difft`. It has
+        // no `diff --git` and no `@@`, so the parser matches nothing. Dropping it
+        // would silently lose the entire diff, so it must come back verbatim.
+        let raw = include_str!("../../../tests/fixtures/git_diff_external_driver_raw.txt");
+        assert!(
+            !raw.contains("diff --git"),
+            "fixture must not be unified diff"
+        );
+
+        let result = compact_diff(raw, 500);
+        assert_eq!(result, raw);
+    }
+
+    #[test]
+    fn test_compact_diff_empty_input_stays_empty() {
+        assert_eq!(compact_diff("", 500), "");
+        assert_eq!(compact_diff("   \n\n", 500), "");
+    }
+
+    #[test]
+    fn test_compact_diff_rename_only_is_not_treated_as_unparseable() {
+        // A pure rename has a `diff --git` marker but no hunks, so `result` is
+        // non-empty and the passthrough fallback must not fire.
+        let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 100%\nrename from old.rs\nrename to new.rs\n";
+        let result = compact_diff(diff, 500);
+        assert_eq!(result.trim(), "new.rs");
     }
 
     #[test]

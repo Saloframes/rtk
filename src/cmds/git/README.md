@@ -8,6 +8,7 @@
 - Flag grammar (which flags take a value, what `-u`/`-p` mean) is per-subcommand, not shared wholesale between `log`/`diff`/`show`/`stash show` — see [`src/core/README.md`](../../core/README.md#argument-tokenizer-arg_tokenizerrs)
 - Default `git status` uses `--porcelain -b` so the compact output never exceeds raw `git status` (an untracked directory collapses to a single line, matching git's default); branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
+- `compact_diff()` falls back to returning its input unchanged when the text contains no `diff --git` / `@@` markers, so unparseable input degrades to passthrough instead of vanishing
 - Exit code propagation is critical for CI/CD pipelines
 - **glab_cmd.rs** declares `-R`/`--repo` and `-g`/`--group` at the clap level; they are **appended** to the glab args (not prepended) so subcommand dispatch stays intact
 - `has_output_flag()` short-circuits to passthrough when the user explicitly requests `-F` / `--output` / `--json` (avoids double JSON injection)

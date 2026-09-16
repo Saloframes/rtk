@@ -582,6 +582,78 @@ fn passthrough<T: AsRef<str>>(
     Ok(exit_code)
 }
 
+/// Strip ripgrep's `-r`/`-R`/`--replace`/`--recursive` from parsed flags.
+///
+/// For grep, `-r`/`-R` is recursive and must pass through. For ripgrep the same
+/// bytes mean `--replace` (value-taking): every match is rewritten with the
+/// following string. rg is already recursive by default, so an agent typing
+/// `rg -rn` out of grep habit silently turns matches into the replacement string
+/// (`rg -rn foo` replaces every match with `n`), corrupting output with no error.
+/// This runs only for `Engine::Rg`; grep never calls it.
+///
+/// Short clusters have r/R removed letter-wise (`-rin` -> `-in`); a cluster that
+/// reduces to nothing is dropped. `--replace X` drops the flag and its value
+/// token; `--replace=X` drops the single token. Value tokens of other flags
+/// (globs, types) are separate non-dash entries and pass through untouched.
+fn strip_rg_replace(flags: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(flags.len());
+    let mut i = 0;
+    while i < flags.len() {
+        let f = &flags[i];
+        if (f == "-r" || f == "-R") && i + 1 < flags.len() && flags[i + 1] == "n" {
+            out.push("-n".to_string());
+            i += 2;
+            continue;
+        }
+        if f == "-r" || f == "-R" {
+            let has_value = i + 1 < flags.len() && !flags[i + 1].starts_with('-');
+            i += if has_value { 2 } else { 1 };
+            continue;
+        }
+        if f == "--recursive" {
+            i += 1;
+            continue;
+        }
+        if f == "--replace" {
+            i += 2; // drop the flag and its space-separated value
+            continue;
+        }
+        if f.starts_with("--replace=") {
+            i += 1;
+            continue;
+        }
+        // A value-taking flag's value is the next token and is NOT a flag, even
+        // when it starts with `-` (`-g -r*.rs`). Copy both through untouched, or
+        // the letter-strip below would rewrite the value (`-r*.rs` -> `-*.s`).
+        // extract_pattern_path emits value-taking short flags alone as `-X`.
+        let takes_value = (f.starts_with("--") && rg_takes_value(TokenKind::Long, &f[2..]))
+            || (f.len() == 2
+                && f.starts_with('-')
+                && rg_takes_value(TokenKind::Short, &f[1..2]));
+        if takes_value {
+            out.push(f.clone());
+            if i + 1 < flags.len() {
+                out.push(flags[i + 1].clone());
+            }
+            i += 2;
+            continue;
+        }
+
+        // Short cluster (`-XrYZ`): strip r/R, keep the remaining boolean letters.
+        if f.starts_with('-') && !f.starts_with("--") && f.len() > 1 {
+            let cleaned: String = f[1..].chars().filter(|c| *c != 'r' && *c != 'R').collect();
+            if !cleaned.is_empty() {
+                out.push(format!("-{}", cleaned));
+            }
+            i += 1;
+            continue;
+        }
+        out.push(f.clone());
+        i += 1;
+    }
+    out
+}
+
 pub fn run(
     engine: Engine,
     max_line_len: usize,
@@ -630,6 +702,13 @@ pub fn run(
 
     let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =
         extract_pattern_path(args, engine);
+
+    // rg treats -r/-R/--replace as --replace (rewrite matches), not recursive.
+    // Strip them so grep muscle-memory (`rg -rn`) can't silently corrupt output.
+    let extra_args = match engine {
+        Engine::Rg => strip_rg_replace(&extra_args),
+        Engine::Grep => extra_args,
+    };
 
     if patterns.is_empty() {
         return passthrough(&timer, engine, args, &real_cmd, false);
@@ -2118,5 +2197,76 @@ mod tests {
         assert!(f(&["--before-context=2"]));
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
+    }
+
+    // --- strip_rg_replace: rg's -r is --replace, not recursive ---
+
+    fn s(args: &[&str]) -> Vec<String> {
+        strip_rg_replace(&args.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn test_strip_rg_replace_standalone() {
+        // `rg -rn foo` parses -r and -n as one cluster "-rn"; the extractor keeps
+        // it as a single flag. After stripping, only -n remains. Before this fix,
+        // "-rn" reached rg as --replace with value "n", corrupting every match.
+        assert_eq!(s(&["-rn"]), vec!["-n"]);
+        assert_eq!(s(&["-r"]), Vec::<String>::new());
+        assert_eq!(s(&["-R"]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_strip_rg_replace_cluster_keeps_other_flags() {
+        // r/R removed letter-wise; surrounding boolean flags survive.
+        assert_eq!(s(&["-rin"]), vec!["-in"]);
+        assert_eq!(s(&["-Rin"]), vec!["-in"]);
+        assert_eq!(s(&["-i", "-r", "-n"]), vec!["-i", "-n"]);
+    }
+
+    #[test]
+    fn test_strip_rg_replace_long_forms() {
+        assert_eq!(s(&["--replace", "n"]), Vec::<String>::new());
+        assert_eq!(s(&["--replace=n"]), Vec::<String>::new());
+        assert_eq!(s(&["--recursive"]), Vec::<String>::new());
+        assert_eq!(s(&["-i", "--replace", "x", "-n"]), vec!["-i", "-n"]);
+    }
+
+    #[test]
+    fn test_strip_rg_replace_leaves_unrelated_untouched() {
+        // Non-r flags and their value tokens (globs, types) pass through as-is.
+        assert_eq!(s(&["-i", "-n"]), vec!["-i", "-n"]);
+        assert_eq!(s(&["-g", "*.rs"]), vec!["-g", "*.rs"]);
+        assert_eq!(s(&["-A", "2"]), vec!["-A", "2"]);
+    }
+
+    #[test]
+    fn test_strip_rg_replace_spares_value_tokens_that_look_like_flags() {
+        // A value-taking flag's value is a separate token (extract_pattern_path
+        // pushes `-g` then the glob). Most values don't start with `-`, so the
+        // cluster branch never sees them — but `--glob=-r*.rs` style values, or
+        // any value beginning with a dash, land in the same list and would be
+        // letter-stripped as if they were a flag cluster (`-r*.rs` -> `-*.s`),
+        // silently changing which files are searched.
+        assert_eq!(s(&["-g", "-r*.rs"]), vec!["-g", "-r*.rs"]);
+        assert_eq!(s(&["--glob", "-recursive*"]), vec!["--glob", "-recursive*"]);
+        assert_eq!(s(&["-t", "-rust"]), vec!["-t", "-rust"]);
+        // Still strips a real -r sitting next to such a flag.
+        assert_eq!(s(&["-r", "-g", "-r*.rs"]), vec!["-g", "-r*.rs"]);
+        // A value-taking flag with no value (end of args) must not panic.
+        assert_eq!(s(&["-g"]), vec!["-g"]);
+    }
+
+    // Full-path regression for the reported bug: `rtk rg -rn class file`.
+    // extract_pattern_path tokenizes `-rn` as `-r` with value `n`; the rg engine
+    // strips `-r` and restores `-n` so the pattern prints intact instead of being replaced by "n".
+    #[test]
+    fn test_rg_rn_flags_stripped_end_to_end() {
+        let (patterns, paths, flags, _, _) =
+            extract_pattern_path(&["-rn", "class", "/tmp/api.rb"], Engine::Rg);
+        assert_eq!(patterns, vec!["class"]);
+        assert_eq!(paths, vec!["/tmp/api.rb"]);
+        assert_eq!(flags, vec!["-r", "n"]);
+        // The rg engine strips it; grep keeps it.
+        assert_eq!(strip_rg_replace(&flags), vec!["-n"]);
     }
 }

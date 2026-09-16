@@ -76,6 +76,22 @@ fn clean_line(line: &str) -> Cow<'_, str> {
     }
 }
 
+const INFORMATIONAL_FLAGS: &[&str] = &[
+    "--showConfig",
+    "--listFiles",
+    "--listFilesOnly",
+    "--init",
+    "--help",
+    "-h",
+    "--version",
+    "-v",
+];
+
+fn is_informational_invocation(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| INFORMATIONAL_FLAGS.contains(&arg.as_str()))
+}
+
 /// `runner` is the package runner the user named (`bunx tsc`, `npx tsc`), or
 /// None for a bare `rtk tsc` where nothing was specified and detection applies.
 pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
@@ -98,10 +114,21 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", via, args.join(" "));
     }
 
+    let args_display = args.join(" ");
+    if is_informational_invocation(args) {
+        return runner::run(
+            cmd,
+            "tsc",
+            &args_display,
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
+    }
+
     runner::run_streamed(
         cmd,
         "tsc",
-        &args.join(" "),
+        &args_display,
         Box::new(BlockStreamFilter::new(TscHandler::new())),
         runner::RunOptions::with_tee("tsc"),
     )
@@ -486,6 +513,26 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
         assert!(result.contains("No errors found"));
     }
 
+    #[test]
+    fn informational_flags_bypass_diagnostic_filtering() {
+        for flag in INFORMATIONAL_FLAGS {
+            assert!(
+                is_informational_invocation(&[flag.to_string()]),
+                "{flag} should preserve native tsc output"
+            );
+        }
+    }
+
+    #[test]
+    fn typecheck_invocations_stay_filtered() {
+        assert!(!is_informational_invocation(&[]));
+        assert!(!is_informational_invocation(&["--noEmit".to_string()]));
+        assert!(!is_informational_invocation(&[
+            "-p".to_string(),
+            "tsconfig.json".to_string()
+        ]));
+    }
+
     // --- Streaming handler tests ---
 
     use crate::core::stream::tests::run_block_filter;
@@ -745,5 +792,25 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable.
         );
         assert!(result.contains("TS2322"), "got: {}", result);
         assert!(result.contains("TS2345"), "got: {}", result);
+    }
+
+    /// Fork-only: enforces the >=60% savings floor from `.claude/rules/cli-testing.md`.
+    /// Upstream has no token-accuracy test for this filter.
+    #[test]
+    fn test_filter_tsc_pretty_real_fixture_token_savings() {
+        // Real `tsc --noEmit --pretty` output (ANSI colors, code frames, carets)
+        let input = include_str!("../../../tests/fixtures/tsc_pretty_errors_raw.txt");
+        let result = filter_tsc_output(input);
+
+        assert!(result.contains("TS2322"), "got: {}", result);
+        assert!(result.contains("src/api/userService.ts"), "got: {}", result);
+        assert!(!result.contains("\x1b["), "ANSI leaked: {}", result);
+
+        // Use rtk's own token estimator (chars/4) - the metric `rtk gain` reports.
+        // Whitespace-based counting is blind to the ANSI escape codes this filter strips.
+        use crate::core::tracking::estimate_tokens;
+        let savings =
+            100.0 - (estimate_tokens(&result) as f64 / estimate_tokens(input) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected >=60% savings, got {:.1}%", savings);
     }
 }

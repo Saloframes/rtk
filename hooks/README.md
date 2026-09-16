@@ -226,7 +226,7 @@ The `allow` value is required by Codex to accept `updatedInput`; Codex still run
 Mutates `args.command` in-place via the zx library:
 
 ```typescript
-const result = await $`rtk rewrite ${command}`.quiet().nothrow()
+const result = await $`rtk rewrite -- ${command}`.quiet().nothrow()
 const rewritten = String(result.stdout).trim()
 if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
@@ -238,7 +238,7 @@ if (rewritten && rewritten !== command) {
 Mutates `args["command"]` in-place via the `pre_tool_call` hook:
 
 ```python
-result = subprocess.run(["rtk", "rewrite", command], capture_output=True, text=True, timeout=2)
+result = subprocess.run(["rtk", "rewrite", "--", command], capture_output=True, text=True, timeout=2)
 rewritten = result.stdout.strip()
 if result.returncode in {0, 3} and rewritten and rewritten != command:
     args["command"] = rewritten
