@@ -10,7 +10,8 @@ use std::sync::LazyLock;
 
 use crate::parser::{
     FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough,
+    emit_degradation_warning, emit_passthrough_warning, passthrough_warning_reason,
+    truncate_passthrough,
 };
 
 /// Matches real Playwright JSON reporter output (suites → specs → tests → results)
@@ -235,6 +236,31 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+/// Strip the user's `--reporter` flag so it can't conflict with the injected
+/// `--reporter=json`. Handles both `--reporter=<name>` and the space-separated
+/// `--reporter <name>` form — the latter must also consume the value, otherwise
+/// the bare reporter name (`list`, `dot`, ...) is left behind as a positional
+/// test-filter and Playwright silently runs the wrong (usually empty) test set.
+fn strip_reporter_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_value = false;
+    for arg in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if arg == "--reporter" {
+            skip_value = true;
+            continue;
+        }
+        if arg.starts_with("--reporter=") {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -265,10 +291,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg("test");
         cmd.arg("--reporter=json");
         // Strip user's --reporter to avoid conflicts with our forced JSON
-        for arg in &args[1..] {
-            if !arg.starts_with("--reporter") {
-                cmd.arg(arg);
-            }
+        for arg in strip_reporter_args(&args[1..]) {
+            cmd.arg(arg);
         }
     } else {
         for arg in args {
@@ -283,30 +307,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd)
         .context("Failed to run playwright (try: npm install -g playwright)")?;
 
-    let raw = format!("{}\n{}", result.stdout, result.stderr);
+    let raw = result.combined();
 
-    // Parse output using PlaywrightParser
-    let parse_result = PlaywrightParser::parse(&result.stdout);
-    let mode = FormatMode::from_verbosity(verbose);
-
-    let filtered = match parse_result {
-        ParseResult::Full(data) => {
-            if verbose > 0 {
-                eprintln!("playwright test (Tier 1: Full JSON parse)");
-            }
-            data.format(mode)
-        }
-        ParseResult::Degraded(data, warnings) => {
-            if verbose > 0 {
-                emit_degradation_warning("playwright", &warnings.join(", "));
-            }
-            data.format(mode)
-        }
-        ParseResult::Passthrough(raw) => {
-            emit_passthrough_warning("playwright", "All parsing tiers failed");
-            raw
-        }
-    };
+    let filtered = format_playwright_output(
+        &result.stdout,
+        &raw,
+        result.exit_code,
+        verbose,
+    );
 
     let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
@@ -324,6 +332,32 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn format_playwright_output(stdout: &str, combined: &str, exit_code: i32, verbose: u8) -> String {
+    let parse_result = PlaywrightParser::parse(stdout);
+    let mode = FormatMode::from_verbosity(verbose);
+
+    match parse_result {
+        ParseResult::Full(data) => {
+            if verbose > 0 {
+                eprintln!("playwright test (Tier 1: Full JSON parse)");
+            }
+            data.format(mode)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("playwright", &warnings.join(", "));
+            }
+            data.format(mode)
+        }
+        ParseResult::Passthrough(_) => {
+            if let Some(reason) = passthrough_warning_reason(exit_code) {
+                emit_passthrough_warning("playwright", reason);
+            }
+            truncate_passthrough(combined)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -470,5 +504,65 @@ mod tests {
         let result = PlaywrightParser::parse(invalid);
         assert_eq!(result.tier(), 3); // Passthrough
         assert!(!result.is_ok());
+    }
+
+    #[test]
+    fn test_playwright_successful_json_ignores_combined_stderr() {
+        let stdout = r#"{
+            "stats": {
+                "expected": 2,
+                "unexpected": 0,
+                "skipped": 0,
+                "duration": 100.0
+            },
+            "suites": []
+        }"#;
+        let combined = format!("{stdout}\nWARN noisy stderr line\n");
+
+        let filtered = format_playwright_output(stdout, &combined, 0, 0);
+
+        assert!(filtered.contains("PASS (2) FAIL (0)"));
+        assert!(!filtered.contains("noisy stderr"));
+    }
+
+    #[test]
+    fn test_playwright_failed_command_passthrough_includes_stderr() {
+        let combined = "Error: command not found: playwright\n";
+
+        let filtered = format_playwright_output("", combined, 1, 0);
+
+        assert_eq!(filtered, combined);
+    }
+
+    // --- --reporter stripping: space-separated form must consume its value ---
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_strip_reporter_space_form_consumes_value() {
+        // `--reporter list` — the value must not survive as a positional
+        // test filter (it would silently run the wrong test set).
+        let result = strip_reporter_args(&strings(&["--reporter", "list", "e2e/login.spec.ts"]));
+        assert_eq!(result, strings(&["e2e/login.spec.ts"]));
+    }
+
+    #[test]
+    fn test_strip_reporter_equals_form() {
+        let result = strip_reporter_args(&strings(&["--reporter=dot", "e2e/login.spec.ts"]));
+        assert_eq!(result, strings(&["e2e/login.spec.ts"]));
+    }
+
+    #[test]
+    fn test_strip_reporter_keeps_unrelated_args() {
+        let result = strip_reporter_args(&strings(&["--workers=2", "--grep", "login"]));
+        assert_eq!(result, strings(&["--workers=2", "--grep", "login"]));
+    }
+
+    #[test]
+    fn test_strip_reporter_trailing_flag_without_value() {
+        let result = strip_reporter_args(&strings(&["spec.ts", "--reporter"]));
+        assert_eq!(result, strings(&["spec.ts"]));
     }
 }

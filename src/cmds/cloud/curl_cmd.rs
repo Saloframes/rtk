@@ -184,6 +184,7 @@ mod tests {
 
     #[test]
     fn test_filter_curl_long_output_truncated() {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let long: String = "x".repeat(1000);
         let result = filter_curl_output(&long, true);
         assert!(result.content.starts_with('x'));
@@ -195,6 +196,7 @@ mod tests {
 
     #[test]
     fn test_filter_curl_multibyte_boundary() {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let content = "a".repeat(499) + "é";
         let result = filter_curl_output(&content, true);
         assert!(result.content.contains("bytes total"));
@@ -203,6 +205,7 @@ mod tests {
 
     #[test]
     fn test_filter_curl_exact_500_bytes() {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let content = "a".repeat(500);
         let result = filter_curl_output(&content, true);
         assert!(result.content.contains("bytes total"));

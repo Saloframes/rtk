@@ -30,6 +30,7 @@ Thumbs.db
 
 # Test artifacts
 *.cast.bak
+__pycache__/
 
 # Benchmark results (fixture data, not infra)
 scripts/benchmark/diff/
@@ -42,12 +43,17 @@ benchmark-report.md
 *.sqlite
 *.sqlite3
 rtk_tracking.db
-claudedocs
+# fork: claudedocs/ is intentionally tracked (adoption triage docs for collaborators);
+# upstream ignores it here
 .omc
 
 # Vitals provenance data
 .vitals/
 .worktrees/
 
-# icm 
+# icm
 .fastembed_cache/
+
+# fork: playwright-cli scratch output (console-*.log / page-*.yml dumps);
+# agent tool artifacts, not authored content
+.playwright-cli/

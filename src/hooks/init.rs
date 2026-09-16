@@ -107,6 +107,13 @@ const KNOWN_PI_PLUGIN_HASHES: &[&str] = &[
     "eb56dd08b8d5f4704906d037d70b357d84d827abe1063135cc7c998efe6cf7f2",
     "628308173ae41c488b76bcf90eafbd4c0c72435927645d81cdbec652eac4b107",
     "3eb16108f51a29c2a62a453d5c97a6ea2da8aea1061da34c50fdcfaa32dc0ff7",
+    // Fork revisions (kylehgc/rtk): upstream's file plus the `--` terminator
+    // before the rewritten command (fork commit 8253401), on top of the
+    // eb56dd08 / 3eb16108 / 5e80e811 upstream bases respectively. Installed
+    // by fork releases, so they must count as stock for a safe uninstall.
+    "dfe5632df8141ad0f757c9c3084b16ffbe7810125692492bd4f1806ead457ca2",
+    "46f413895909c91c44c8cac7d02ab922369512c019cfac69f13c4d6410751854",
+    "8a496cff6486565ad4b90b4770f124f6f5fb470b44c95ea9911c2314c136bbe1",
 ];
 
 // Embedded agent-neutral RTK awareness instructions, one file per `awareness.level`.
@@ -768,12 +775,23 @@ fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
         .join(SETTINGS_JSON);
     println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
-    println!("      }}]");
-    println!("    }}]}}");
+    println!("    \"hooks\": {{ \"PreToolUse\": [");
+    // Driven off CLAUDE_HOOK_MATCHERS so the manual instructions can't drift
+    // from what insert_hook_entry actually writes.
+    for (i, matcher) in CLAUDE_HOOK_MATCHERS.iter().enumerate() {
+        let comma = if i + 1 < CLAUDE_HOOK_MATCHERS.len() {
+            ","
+        } else {
+            ""
+        };
+        println!("      {{");
+        println!("        \"matcher\": \"{}\",", matcher);
+        println!("        \"hooks\": [{{ \"type\": \"command\",");
+        println!("          \"command\": \"{}\"", hook_command);
+        println!("        }}]");
+        println!("      }}{}", comma);
+    }
+    println!("    ]}}");
     println!("  }}");
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
@@ -1265,8 +1283,9 @@ fn patch_settings_json_command(
         serde_json::json!({})
     };
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    // Check idempotency. Every matcher must be covered, not just one: an
+    // install from an older rtk has Bash only and still needs PowerShell.
+    if all_hook_matchers_present(&root, hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -1371,9 +1390,53 @@ fn clean_double_blanks(content: &str) -> String {
     result.join("\n")
 }
 
-/// Deep-merge RTK hook entry into settings.json
-/// Creates hooks.PreToolUse structure if missing, preserves existing hooks
+/// Claude Code shell tools RTK registers a PreToolUse hook for.
+/// Windows routes most shell calls through PowerShell, Unix through Bash.
+const CLAUDE_HOOK_MATCHERS: [&str; 2] = ["Bash", "PowerShell"];
+
+/// True if `command` is an RTK hook invocation (legacy script or binary command)
+fn is_rtk_hook_command(command: &str, hook_command: &str) -> bool {
+    command == hook_command
+        || is_claude_hook_command(command)
+        || command.contains(REWRITE_HOOK_FILE)
+}
+
+/// True if `matcher` already carries an RTK hook in hooks.PreToolUse
+fn matcher_has_rtk_hook(root: &serde_json::Value, hook_command: &str, matcher: &str) -> bool {
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher))
+                .filter_map(|entry| entry.get("hooks")?.as_array())
+                .flatten()
+                .filter_map(|hook| hook.get("command")?.as_str())
+                .any(|command| is_rtk_hook_command(command, hook_command))
+        })
+}
+
+/// True once every matcher in [`CLAUDE_HOOK_MATCHERS`] carries an RTK hook.
+/// Stricter than [`hook_already_present`]: a settings.json written by an older
+/// rtk has only the Bash entry, and must still be topped up with PowerShell.
+fn all_hook_matchers_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    CLAUDE_HOOK_MATCHERS
+        .iter()
+        .all(|matcher| matcher_has_rtk_hook(root, hook_command, matcher))
+}
+
+/// Deep-merge RTK hook entries into settings.json
+/// Creates hooks.PreToolUse structure if missing, preserves existing hooks.
+/// Only adds matchers that aren't already registered, so re-running `rtk init`
+/// tops up a Bash-only install instead of duplicating it.
 fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    let missing: Vec<&str> = CLAUDE_HOOK_MATCHERS
+        .iter()
+        .copied()
+        .filter(|matcher| !matcher_has_rtk_hook(root, hook_command, matcher))
+        .collect();
+
     let root_obj = match root.as_object_mut() {
         Some(obj) => obj,
         None => {
@@ -1394,13 +1457,15 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         .as_array_mut()
         .context("PreToolUse value is not an array")?;
 
-    pre_tool_use.push(serde_json::json!({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": hook_command
-        }]
-    }));
+    for matcher in missing {
+        pre_tool_use.push(serde_json::json!({
+            "matcher": matcher,
+            "hooks": [{
+                "type": "command",
+                "command": hook_command
+            }]
+        }));
+    }
     Ok(())
 }
 
@@ -1421,9 +1486,7 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| {
-            cmd == hook_command || is_claude_hook_command(cmd) || cmd.contains(REWRITE_HOOK_FILE)
-        })
+        .any(|cmd| is_rtk_hook_command(cmd, hook_command))
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -5257,8 +5320,21 @@ fn show_claude_config() -> Result<()> {
         let content = strip_leading_bom(&content);
         if !content.trim().is_empty() {
             if let Ok(root) = from_json_str::<serde_json::Value>(content) {
-                if hook_already_present(&root, CLAUDE_HOOK_COMMAND) {
+                if all_hook_matchers_present(&root, CLAUDE_HOOK_COMMAND) {
                     println!("[ok] settings.json: RTK hook configured");
+                } else if hook_already_present(&root, CLAUDE_HOOK_COMMAND) {
+                    // Registered, but not for every matcher — an install from an
+                    // older rtk has Bash only, so Windows PowerShell calls miss it.
+                    let missing: Vec<&str> = CLAUDE_HOOK_MATCHERS
+                        .iter()
+                        .copied()
+                        .filter(|m| !matcher_has_rtk_hook(&root, CLAUDE_HOOK_COMMAND, m))
+                        .collect();
+                    println!(
+                        "[warn] settings.json: RTK hook configured, missing matcher: {}",
+                        missing.join(", ")
+                    );
+                    println!("    Run: rtk init -g --auto-patch");
                 } else {
                     println!("[warn] settings.json: exists but RTK hook not configured");
                     println!("    Run: rtk init -g --auto-patch");
@@ -7553,7 +7629,10 @@ mod tests {
         let root: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
         assert!(codex_hook_already_present(&root));
-        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            root["hooks"]["PreToolUse"].as_array().unwrap().len(),
+            1 + CLAUDE_HOOK_MATCHERS.len()
+        );
         assert_eq!(
             root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
             "echo existing"
@@ -8363,10 +8442,17 @@ mod tests {
         );
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use.len(), 2);
 
-        let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(command, hook_command);
+        let bash_matcher = pre_tool_use[0]["matcher"].as_str().unwrap();
+        assert_eq!(bash_matcher, "Bash");
+        let bash_command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(bash_command, hook_command);
+
+        let ps_matcher = pre_tool_use[1]["matcher"].as_str().unwrap();
+        assert_eq!(ps_matcher, "PowerShell");
+        let ps_command = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(ps_command, hook_command);
     }
 
     #[test]
@@ -8387,15 +8473,139 @@ mod tests {
         insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 2); // Should have both hooks
+        assert_eq!(pre_tool_use.len(), 3); // Should have existing + Bash + PowerShell
 
         // Check first hook is preserved
         let first_command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(first_command, "/some/other/hook.sh");
 
-        // Check second hook is RTK
+        // Check Bash RTK hook
+        let bash_matcher = pre_tool_use[1]["matcher"].as_str().unwrap();
+        assert_eq!(bash_matcher, "Bash");
         let second_command = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(second_command, hook_command);
+
+        // Check PowerShell RTK hook
+        let ps_matcher = pre_tool_use[2]["matcher"].as_str().unwrap();
+        assert_eq!(ps_matcher, "PowerShell");
+        let third_command = pre_tool_use[2]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(third_command, hook_command);
+    }
+
+    /// A settings.json written by an older rtk carries only the Bash matcher.
+    /// Re-running `rtk init` must top it up with PowerShell rather than
+    /// reporting "already present" and leaving Windows traffic unhooked.
+    #[test]
+    fn test_insert_hook_entry_tops_up_bash_only_install() {
+        let hook_command = CLAUDE_HOOK_COMMAND;
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": hook_command }]
+                }]
+            }
+        });
+
+        assert!(
+            !all_hook_matchers_present(&json_content, hook_command),
+            "Bash-only install must not count as fully registered"
+        );
+
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 2, "Bash kept, PowerShell added");
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        assert_eq!(pre_tool_use[1]["matcher"], "PowerShell");
+        assert_eq!(pre_tool_use[1]["hooks"][0]["command"], hook_command);
+        assert!(all_hook_matchers_present(&json_content, hook_command));
+    }
+
+    /// Topping up must not duplicate entries when run twice.
+    #[test]
+    fn test_insert_hook_entry_is_idempotent() {
+        let hook_command = CLAUDE_HOOK_COMMAND;
+        let mut json_content = serde_json::json!({});
+
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 2, "no duplicate matcher entries");
+    }
+
+    /// A legacy script hook under Bash still counts as Bash coverage, so only
+    /// the PowerShell entry gets added.
+    #[test]
+    fn test_insert_hook_entry_tops_up_legacy_script_install() {
+        let hook_command = CLAUDE_HOOK_COMMAND;
+        let legacy = format!("/Users/test/.claude/hooks/{}", REWRITE_HOOK_FILE);
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": legacy }]
+                }]
+            }
+        });
+
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(
+            pre_tool_use.len(),
+            2,
+            "legacy Bash entry kept, PowerShell added"
+        );
+        assert_eq!(pre_tool_use[0]["hooks"][0]["command"], legacy);
+        assert_eq!(pre_tool_use[1]["matcher"], "PowerShell");
+    }
+
+    /// The status display distinguishes three states. A Bash-only install is
+    /// "present" (so it isn't reported as unconfigured) but not "complete", so
+    /// `rtk init --show` can tell the user to re-run init instead of [ok].
+    #[test]
+    fn test_bash_only_install_is_present_but_incomplete() {
+        let hook_command = CLAUDE_HOOK_COMMAND;
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": hook_command }]
+                }]
+            }
+        });
+
+        assert!(
+            hook_already_present(&json_content, hook_command),
+            "status must not claim RTK is unconfigured"
+        );
+        assert!(
+            !all_hook_matchers_present(&json_content, hook_command),
+            "status must not claim RTK is fully configured"
+        );
+    }
+
+    /// `matcher_has_rtk_hook` must not credit a matcher for another one's hook.
+    #[test]
+    fn test_matcher_has_rtk_hook_is_matcher_scoped() {
+        let hook_command = CLAUDE_HOOK_COMMAND;
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": hook_command }]
+                }]
+            }
+        });
+
+        assert!(matcher_has_rtk_hook(&json_content, hook_command, "Bash"));
+        assert!(!matcher_has_rtk_hook(
+            &json_content,
+            hook_command,
+            "PowerShell"
+        ));
     }
 
     #[test]
@@ -9220,7 +9430,11 @@ mod tests {
 
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
             let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
-            assert_eq!(count, 1, "hook command must appear exactly once");
+            assert_eq!(
+                count,
+                CLAUDE_HOOK_MATCHERS.len(),
+                "hook command must appear exactly once per matcher"
+            );
         });
     }
 

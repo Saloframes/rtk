@@ -9,22 +9,38 @@ use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use crate::core::tracking::HookOutcome;
 use crate::core::utils::strip_leading_bom;
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
+const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn read_stdin_limited() -> Result<String> {
-    let mut input = String::new();
-    io::stdin()
-        .take((STDIN_CAP + 1) as u64)
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
-    if input.len() > STDIN_CAP {
-        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+    let (tx, rx) = mpsc::sync_channel(1);
+
+    thread::spawn(move || {
+        let mut input = String::new();
+        let result = io::stdin()
+            .take((STDIN_CAP + 1) as u64)
+            .read_to_string(&mut input)
+            .context("Failed to read stdin")
+            .and_then(|_| {
+                if input.len() > STDIN_CAP {
+                    anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+                }
+                Ok(input)
+            });
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(STDIN_READ_TIMEOUT) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => Ok(String::new()),
     }
-    Ok(input)
 }
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
@@ -365,6 +381,15 @@ fn copilot_cli_response_from_decision(
 /// Run the Gemini CLI BeforeTool hook.
 pub fn run_gemini() -> Result<()> {
     let input = read_stdin_limited()?;
+
+    // Fail open on empty input (EOF or stdin timeout), like every other
+    // runner: without this guard the serde parse fails and the hook exits
+    // nonzero, blocking the tool call it gates.
+    if strip_leading_bom(&input).trim().is_empty() {
+        let _ = writeln!(io::stdout(), "{}", gemini_json("allow", None));
+        return Ok(());
+    }
+
     let output = run_gemini_inner(&input).context("Failed to parse hook input as JSON")?;
     let _ = writeln!(io::stdout(), "{output}");
     Ok(())
@@ -562,6 +587,16 @@ enum PayloadAction {
         reason: &'static str,
         cmd: String,
     },
+    /// A deny rule matched a segment that's already in `rtk …` form. Unlike
+    /// the ordinary Skip-on-deny path (which relies on the host's own native
+    /// check catching it), the host's native check evaluates the raw text
+    /// unchanged and has no concept of `rtk` as an alias — it would not
+    /// recognize `rtk rm -rf …` as matching a `Bash(rm:*)` deny rule. Assert
+    /// the deny explicitly instead of silently stepping aside. See #3152.
+    Deny {
+        cmd: String,
+        output: Value,
+    },
     Ignore,
 }
 
@@ -570,7 +605,10 @@ fn pre_tool_use_rewrite_output(
     rewritten: &str,
     permission_decision: Option<&str>,
 ) -> Value {
-    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    let mut updated_input = claude_payload_input(v)
+        .map(|(input, _)| input.clone())
+        .or_else(|| v.get("tool_input").cloned())
+        .unwrap_or_else(|| json!({}));
     if let Some(obj) = updated_input.as_object_mut() {
         obj.insert("command".into(), Value::String(rewritten.to_string()));
     }
@@ -587,13 +625,36 @@ fn pre_tool_use_rewrite_output(
     json!({ "hookSpecificOutput": hook_output })
 }
 
+fn claude_payload_input(v: &Value) -> Option<(&Value, &str)> {
+    for key in ["tool_input", "input"] {
+        if let Some(input) = v.get(key)
+            && let Some(cmd) = input
+                .get("command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+        {
+            return Some((input, cmd));
+        }
+    }
+
+    None
+}
+
+/// True if any segment of `cmd` is already in `rtk …` form. Used to decide
+/// whether a Deny verdict is safe to leave to the host's own native
+/// permission check (works for the original, un-rewritten command text)
+/// or must be asserted explicitly (the host's native check evaluates the
+/// raw text unchanged and has no concept of `rtk` as an alias for the
+/// underlying tool). See #3152.
+fn contains_already_rtk_segment(cmd: &str) -> bool {
+    crate::discover::lexer::split_for_permissions(cmd)
+        .iter()
+        .any(|segment| permissions::is_rtk_prefixed(segment.trim()))
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
-        Some(c) => c,
+    let cmd = match claude_payload_input(v) {
+        Some((_, cmd)) => cmd,
         None => return PayloadAction::Ignore,
     };
 
@@ -611,6 +672,19 @@ fn process_claude_payload_from_decision(
 ) -> PayloadAction {
     let (rewritten, allow) = match decision {
         HookDecision::Deny => {
+            if contains_already_rtk_segment(cmd) {
+                let output = json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": PRE_TOOL_USE_KEY,
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "RTK: matches a configured deny rule"
+                    }
+                });
+                return PayloadAction::Deny {
+                    cmd: cmd.to_string(),
+                    output,
+                };
+            }
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
                 reason: "skip:deny_rule",
@@ -628,9 +702,17 @@ fn process_claude_payload_from_decision(
         HookDecision::AskRewrite(r) => (r, false),
     };
 
+    let decision_str = if allow {
+        Some("allow")
+    } else if v.get("permission_mode").and_then(Value::as_str) != Some("bypassPermissions") {
+        Some("ask")
+    } else {
+        None
+    };
+
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
-        output: pre_tool_use_rewrite_output(v, &rewritten, allow.then_some("allow")),
+        output: pre_tool_use_rewrite_output(v, &rewritten, decision_str),
         rewritten,
         decision: if allow {
             HookOutcome::Allow
@@ -736,6 +818,13 @@ pub fn run_claude() -> Result<()> {
             audit_log(reason, &cmd, "");
             log_hook_decision(&v, &cmd, decision, None);
         }
+        PayloadAction::Deny { cmd, output } => {
+            // Same order as the Rewrite arm: the response Claude Code is
+            // blocked on goes out before the best-effort side channels.
+            let _ = writeln!(io::stdout(), "{output}");
+            audit_log("deny:already_rtk", &cmd, "");
+            log_hook_decision(&v, &cmd, HookOutcome::Deny, None);
+        }
         PayloadAction::Ignore => {}
     }
 
@@ -748,6 +837,7 @@ fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        PayloadAction::Deny { output, .. } => Some(output.to_string()),
         _ => None,
     }
 }
@@ -876,6 +966,10 @@ pub fn run_codex() -> Result<()> {
             let _ = writeln!(io::stdout(), "{output}");
         }
         PayloadAction::Skip { cmd, reason, .. } => audit_log(reason, &cmd, ""),
+        PayloadAction::Deny { cmd, output } => {
+            audit_log("deny:already_rtk", &cmd, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
         PayloadAction::Ignore => {}
     }
 
@@ -1623,6 +1717,18 @@ mod tests {
         .to_string()
     }
 
+    fn claude_current_input_with_fields(cmd: &str, timeout: u64, description: &str) -> String {
+        json!({
+            "tool": "Bash",
+            "input": {
+                "command": cmd,
+                "timeout": timeout,
+                "description": description
+            }
+        })
+        .to_string()
+    }
+
     /// Matches the real PreToolUse payload shape captured from a live Claude Code
     /// session (verified fields: session_id, transcript_path, cwd, tool_use_id).
     fn claude_payload_with_ids(cmd: &str, session_id: &str, tool_use_id: &str, cwd: &str) -> Value {
@@ -1779,6 +1885,35 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_rewrite_accepts_current_tool_input_keys() {
+        let input = claude_current_input_with_fields("grep -r hello .", 30000, "Search repo");
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk grep -r hello .");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Search repo");
+    }
+
+    #[test]
+    fn test_claude_tool_input_wins_over_input_when_both_present() {
+        // Precedence is load-bearing: the selected object is both gated and
+        // echoed back as updatedInput, so legacy `tool_input` must win.
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" },
+            "input": { "command": "git log" }
+        })
+        .to_string();
+        let result = run_claude_inner(&input).expect("rewrite expected");
+        let v: Value = serde_json::from_str(&result).expect("valid hook JSON");
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
     fn test_claude_passthrough_no_output() {
         assert!(run_claude_inner(&claude_input("htop")).is_none());
     }
@@ -1810,7 +1945,50 @@ mod tests {
 
     #[test]
     fn test_claude_already_rtk_passthrough() {
-        assert!(run_claude_inner(&claude_input("rtk git status")).is_none());
+        // No rules → Default verdict → already-rtk command still defers.
+        // Driven through the injected decision path: since #3152 the
+        // outcome depends on permission rules, so reading the real on-disk
+        // settings here would make the test environment-dependent.
+        let cmd = "rtk git status";
+        let input = json!({"tool_name": "Bash", "tool_input": {"command": cmd}});
+        let action = process_claude_payload_from_decision(
+            &input,
+            cmd,
+            decide_from_verdict(
+                cmd,
+                permissions::check_command_with_rules(cmd, &[], &[], &[]),
+            ),
+        );
+        assert!(matches!(
+            action,
+            PayloadAction::Skip {
+                decision: HookOutcome::Defer,
+                ..
+            }
+        ));
+    }
+
+    // --- contains_already_rtk_segment (used by the active-deny path, #3152) ---
+
+    #[test]
+    fn test_contains_already_rtk_segment_detects_prefix() {
+        assert!(contains_already_rtk_segment("rtk rm -rf /"));
+        assert!(contains_already_rtk_segment("rtk"));
+        assert!(contains_already_rtk_segment(
+            "git status && rtk rm -rf /tmp/x"
+        ));
+    }
+
+    #[test]
+    fn test_contains_already_rtk_segment_ignores_original_form() {
+        assert!(!contains_already_rtk_segment("rm -rf /"));
+        assert!(!contains_already_rtk_segment("git status && cargo test"));
+        // A tool name that merely starts with "rtk" as a substring, not a
+        // whole segment/prefix, must not false-positive.
+        assert!(!contains_already_rtk_segment("rtkinit --help"));
+        // Env-prefixed and quoted shapes are not rtk-prefixed segments.
+        assert!(!contains_already_rtk_segment("FOO=1 rtk rm -rf /"));
+        assert!(!contains_already_rtk_segment("'rtk' rm -rf /"));
     }
 
     #[test]
@@ -1879,11 +2057,26 @@ mod tests {
         let hook = &v["hookSpecificOutput"];
 
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        // permissionDecision is only set when an explicit allow rule matches;
-        // with default-to-ask semantics (no rules configured), it is absent.
+        assert_eq!(hook["permissionDecision"], "ask");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
+    }
+
+    #[test]
+    fn test_claude_bypass_ask_omits_permission_decision() {
+        let input = json!({
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert!(hook.get("permissionDecision").is_none());
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
     }
 
     #[test]
@@ -2425,6 +2618,101 @@ mod tests {
             decide_with_rules("git status 2>&1", &[], &[], &all_allowed()),
             HookDecision::AllowRewrite(_)
         ));
+    }
+
+    // --- Regression tests for #3152 ---
+    // The verdict for an already-rtk command is computed by the
+    // rtk-aware matcher in `permissions`, so a deny against the underlying
+    // tool still fires. Anything short of Deny defers: the identity
+    // rewrite is suppressed by `decision::suppress_identity`.
+
+    #[test]
+    fn test_decide_deny_for_already_rtk_command() {
+        let deny = vec!["rm:*".to_string()];
+        assert!(matches!(
+            decide_with_rules("rtk rm -rf /", &deny, &[], &all_allowed()),
+            HookDecision::Deny
+        ));
+    }
+
+    // --- Fork amendments to #3195 ---
+
+    #[test]
+    fn test_decide_deny_sees_through_command_wrappers() {
+        // `rtk proxy <cmd>` executes <cmd> raw; err/test/summary execute it
+        // filtered. A deny against the wrapped tool must fire even when the
+        // rtk form itself is allowlisted.
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["rtk:*".to_string()];
+        for cmd in [
+            "rtk proxy rm -rf /",
+            "rtk run rm -rf /",
+            "rtk err rm -rf /",
+            "rtk test rm -rf /",
+            "rtk summary rm -rf /",
+            "rtk rtk proxy rm -rf /",
+        ] {
+            assert!(
+                matches!(
+                    decide_with_rules(cmd, &deny, &[], &allow),
+                    HookDecision::Deny
+                ),
+                "{cmd} must be denied, not allow-asserted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_claude_payload_asserts_deny_for_already_rtk_command() {
+        // End to end through the payload path: an already-rtk deny match must
+        // render an explicit permissionDecision: "deny", not a silent skip.
+        let deny = vec!["rm:*".to_string()];
+        let cmd = "rtk rm -rf /tmp/x";
+        let input = json!({"tool_name": "Bash", "tool_input": {"command": cmd}});
+        let action = process_claude_payload_from_decision(
+            &input,
+            cmd,
+            decide_from_verdict(
+                cmd,
+                permissions::check_command_with_rules(cmd, &deny, &[], &[]),
+            ),
+        );
+        match action {
+            PayloadAction::Deny { cmd, output } => {
+                assert_eq!(cmd, "rtk rm -rf /tmp/x");
+                assert_eq!(
+                    output
+                        .pointer("/hookSpecificOutput/permissionDecision")
+                        .and_then(Value::as_str),
+                    Some("deny")
+                );
+            }
+            _ => panic!("expected PayloadAction::Deny"),
+        }
+    }
+
+    #[test]
+    fn test_claude_payload_original_form_deny_stays_skip() {
+        // The non-rtk deny path must keep deferring to the host's native
+        // check (silent skip), byte-for-byte as before #3152.
+        let deny = vec!["rm:*".to_string()];
+        let cmd = "rm -rf /tmp/x";
+        let input = json!({"tool_name": "Bash", "tool_input": {"command": cmd}});
+        let action = process_claude_payload_from_decision(
+            &input,
+            cmd,
+            decide_from_verdict(
+                cmd,
+                permissions::check_command_with_rules(cmd, &deny, &[], &[]),
+            ),
+        );
+        match action {
+            PayloadAction::Skip { decision, cmd, .. } => {
+                assert_eq!(decision, HookOutcome::Deny);
+                assert_eq!(cmd, "rm -rf /tmp/x");
+            }
+            _ => panic!("expected PayloadAction::Skip"),
+        }
     }
 
     // --- Gemini rendering ---

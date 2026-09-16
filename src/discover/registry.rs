@@ -2578,13 +2578,12 @@ mod tests {
 
     #[test]
     fn test_classify_yadm_status() {
+        // yadm manages a separate dotfiles repository; it must never be
+        // rewritten to `rtk git`, which would act on the current project.
         assert_eq!(
             classify_command("yadm status"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                category: "Git",
-                estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+            Classification::Unsupported {
+                base_command: "yadm status".to_string(),
             }
         );
     }
@@ -2593,20 +2592,35 @@ mod tests {
     fn test_classify_yadm_diff() {
         assert_eq!(
             classify_command("yadm diff"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                category: "Git",
-                estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+            Classification::Unsupported {
+                base_command: "yadm diff".to_string(),
             }
         );
     }
 
     #[test]
     fn test_rewrite_yadm_status() {
+        // Regression for #3408: yadm subcommands must route through the yadm
+        // filter to the yadm binary, never to git in the current directory.
         assert_eq!(
             rewrite_command_no_prefixes("yadm status", &[]),
-            Some("rtk git status".to_string())
+            Some("rtk yadm status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yadm_commit() {
+        assert_eq!(
+            rewrite_command_no_prefixes("yadm commit -m x", &[]),
+            Some("rtk yadm commit -m x".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yadm_add() {
+        assert_eq!(
+            rewrite_command_no_prefixes("yadm add .", &[]),
+            Some("rtk yadm add .".to_string())
         );
     }
 
@@ -3612,6 +3626,87 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
             Some("rtk find . -name '*.rs'".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_pipe_skipped() {
+        // rtk grep prepends a "N matches in M files:" header, caps matches and
+        // appends an elision line — a downstream consumer sees those instead
+        // of matches (`grep -n X f | wc -l` counted 28 for 60 real matches).
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -n match sixty.txt | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_pipe_producer_stays_raw() {
+        // head maps to `rtk read --max-lines`, whose "[N more lines]" marker
+        // would reach whatever parses the file content downstream — so the
+        // producer stays raw. The final grep stage streams stdin faithfully
+        // and is safe to rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 src/main.rs | grep use", &[]),
+            Some("head -20 src/main.rs | rtk grep use".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_env_prefix_pipe_skipped() {
+        // A leading VAR=value assignment does not hide the pipe-incompatible
+        // command (rewrite_segment strips env prefixes the same way).
+        assert_eq!(
+            rewrite_command_no_prefixes("LC_ALL=C grep -n match f.txt | sort", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sudo_env_prefix_pipe_skipped() {
+        // sudo/env and quoted env values are stripped by the same ENV_PREFIX
+        // regex the rewrite path uses — they must not hide a pipe-incompatible
+        // command (`sudo grep … | wc -l` was still rewritten before).
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo grep -n match f.txt | wc -l", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("env grep -n match f.txt | sort", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("LC_ALL=\"en US\" grep -n match f.txt | sort", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_absolute_path_pipe_skipped() {
+        // rewrite_segment normalizes `/usr/bin/grep` to `grep` (#485), so the
+        // pipe skip must apply the same basename normalization.
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/grep -n match f.txt | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_no_pipe_still_rewritten() {
+        // grep WITHOUT a pipe keeps its rewrite — the compact form is for the
+        // agent's eyes, and no downstream program consumes it.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn TODO src", &[]),
+            Some("rtk grep -rn TODO src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_skip_only_affects_pipeline_segment() {
+        // Segments joined by `&&` after the pipeline still get rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -n x f | wc -l && git status", &[]),
+            Some("grep -n x f | wc -l && rtk git status".into())
         );
     }
 
@@ -5131,16 +5226,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -5149,10 +5240,8 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
             "npm lint",
@@ -5161,7 +5250,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
@@ -5191,16 +5279,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -5209,10 +5293,8 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
             "npm lint",
@@ -5221,7 +5303,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
@@ -5233,6 +5314,26 @@ mod tests {
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
                 Some("rtk lint".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint_scripts_delegate_to_package_manager() {
+        let commands = vec![
+            ("npm run lint", "rtk npm run lint"),
+            ("npm run-script lint", "rtk npm run-script lint"),
+            ("pnpm run lint", "rtk pnpm run lint"),
+            ("pnpm run-script lint", "rtk pnpm run-script lint"),
+            ("pnpm lint", "rtk pnpm lint"),
+        ];
+
+        for (command, expected) in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
                 "Failed for command: {}",
                 command
             );
@@ -6224,6 +6325,21 @@ mod tests {
         assert!(rewrite_command_no_prefixes("golangci-lint run ./...", &excluded).is_some());
     }
 
+    // #3035: the exclusion must cover the resolved tool, not just the raw text,
+    // so module/wrapper forms don't slip past it.
+    #[test]
+    fn test_exclude_resolved_tool_requires_word_boundary() {
+        // "py" must not exclude commands resolving to "pytest"
+        let excluded = vec!["py".to_string()];
+        assert!(rewrite_command_no_prefixes("python3 -m pytest tests/", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_other_tool_does_not_hit_python_m_form() {
+        let excluded = vec!["mypy".to_string()];
+        assert!(rewrite_command_no_prefixes("python3 -m pytest tests/", &excluded).is_some());
+    }
+
     #[test]
     fn test_exclude_empty_pattern_ignored() {
         let excluded = vec!["".to_string()];
@@ -6234,6 +6350,31 @@ mod tests {
     fn test_exclude_bare_anchor_ignored() {
         let excluded = vec!["^".to_string()];
         assert!(rewrite_command_no_prefixes("git status", &excluded).is_some());
+    }
+
+    // --- exclude_commands on head/tail rewrites (#2363) ---
+
+    #[test]
+    fn test_exclude_head_with_redirect_suffix() {
+        // Exclusion must apply to the command part, ignoring trailing redirects
+        let excluded = vec!["head".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 package.json 2>&1", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_tail_line_range_raw_regex_pattern() {
+        // compile_exclude_patterns has two branches: a bare name is escaped and
+        // anchored into `^name($|\s)`, while a `^`-prefixed pattern is compiled
+        // raw. The cases above only reach the escaped branch — this drives the
+        // raw one into the same fast path (upstream #3109).
+        let excluded = vec!["^tail -n".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 400 /var/log/foo.log", &excluded),
+            None
+        );
     }
 
     #[test]
