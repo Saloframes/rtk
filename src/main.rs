@@ -1616,15 +1616,13 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         // TOML match: capture stdout for filtering
         let result = if filter.filter_stderr {
             // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
-            core::utils::resolved_command(&args[0])
-                .args(&args_os[1..])
+            core::utils::passthrough_command(&args[0], &args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped()) // captured for merging
                 .output()
         } else {
-            core::utils::resolved_command(&args[0])
-                .args(&args_os[1..])
+            core::utils::passthrough_command(&args[0], &args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped()) // capture
                 .stderr(std::process::Stdio::inherit()) // stderr always direct
@@ -1692,8 +1690,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         }
     } else {
         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
-        let status = core::utils::resolved_command(&args[0])
-            .args(&args_os[1..])
+        let status = core::utils::passthrough_command(&args[0], &args[1..])
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())

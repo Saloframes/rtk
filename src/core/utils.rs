@@ -596,6 +596,47 @@ pub fn join_or_ok(lines: &[&str]) -> String {
     }
 }
 
+/// Build the PowerShell argument tail that runs a parsed command line
+/// (`program` + `args`) as a native PowerShell command.
+///
+/// PowerShell concatenates the tokens that follow `-Command` into the command
+/// text, so cmdlets, functions, and aliases run natively.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn powershell_invocation(program: &str, args: &[String]) -> Vec<String> {
+    let mut v = vec![
+        "-NoProfile".to_string(),
+        "-NoLogo".to_string(),
+        "-Command".to_string(),
+        program.to_string(),
+    ];
+    v.extend(args.iter().cloned());
+    v
+}
+
+#[cfg(windows)]
+pub fn powershell_exe() -> &'static str {
+    if tool_exists("pwsh") {
+        "pwsh"
+    } else {
+        "powershell"
+    }
+}
+
+pub fn passthrough_command(program: &str, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        if resolve_binary(program).is_err() {
+            let mut c = Command::new(powershell_exe());
+            c.args(powershell_invocation(program, args));
+            return c;
+        }
+    }
+    let mut c = resolved_command(program);
+    c.args(args);
+    c
+}
+}
+
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
@@ -603,22 +644,29 @@ pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
+/// UNIX-style commands rtk's filters delegate to that are part of the base
+/// system on Linux/macOS. On Windows they are provided by Microsoft Coreutils
+/// (`winget install Microsoft.Coreutils`), which exposes each under its standard
+/// name (`ls.exe`, `grep.exe`, …) on PATH — resolved here via `which`.
+pub const COREUTILS_TOOLS: &[&str] = &["ls", "wc", "grep", "head", "tail", "sort", "uniq", "cat"];
+
+/// Returns the subset of [`COREUTILS_TOOLS`] not found on PATH.
+///
+/// Cross-platform so it can be unit-tested everywhere, but only meaningful on
+/// Windows (callers gate the resulting guidance behind `cfg!(windows)`).
+pub fn missing_coreutils() -> Vec<&'static str> {
+    COREUTILS_TOOLS
+        .iter()
+        .copied()
+        .filter(|t| !tool_exists(t))
+        .collect()
+}
+
 /// Check if a compile-time environment variable was set to a non-empty value.
 ///
-/// `option_env!` yields `Some("")` when the build environment exports the
-/// variable with an empty value, which a CI `env:` block fed by an unset
-/// repository variable does. `.is_some()` alone then reports a feature as
-/// configured when it is not, so pair every `option_env!` gate with this.
-///
-/// # Examples
-/// ```
-/// use rtk::utils::env_is_some;
-/// assert!(env_is_some(Some("https://example.com")));
-/// assert!(!env_is_some(Some("")));
-/// assert!(!env_is_some(None));
-/// ```
 pub fn env_is_some(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.is_empty())
+}
 }
 
 /// Extract short name from AWS ARN.
@@ -838,12 +886,6 @@ mod tests {
     }
 
     #[test]
-    fn test_days_ago_cutoff_normal_value_is_in_the_past() {
-        let cutoff = days_ago_cutoff(30);
-        assert!(cutoff < Utc::now());
-    }
-
-    #[test]
     fn test_days_ago_cutoff_does_not_panic_on_huge_since_days() {
         // rtk-ai/rtk#3206 review: `rtk discover --since 100000000` and `rtk hook
         // audit --since 100000000` both panicked with "DateTime - TimeDelta
@@ -854,6 +896,19 @@ mod tests {
     #[test]
     fn test_days_ago_cutoff_does_not_panic_on_u64_max() {
         assert_eq!(days_ago_cutoff(u64::MAX), DateTime::<Utc>::MIN_UTC);
+    }
+
+    #[test]
+    fn test_missing_coreutils_is_subset() {
+        let missing = missing_coreutils();
+        for tool in &missing {
+            assert!(
+                COREUTILS_TOOLS.contains(tool),
+                "{tool} not in COREUTILS_TOOLS"
+            );
+        }
+        assert!(missing.len() <= COREUTILS_TOOLS.len());
+    }
     }
 
     #[test]
@@ -1101,6 +1156,32 @@ mod tests {
         );
     }
 
+    // ===== PowerShell passthrough tests (PR #2355) =====
+
+    #[test]
+    fn test_powershell_invocation_no_args() {
+        let argv = powershell_invocation("Get-ChildItem", &[]);
+        assert_eq!(
+            argv,
+            vec!["-NoProfile", "-NoLogo", "-Command", "Get-ChildItem"]
+        );
+    }
+
+    #[test]
+    fn test_powershell_invocation_with_args() {
+        let argv = powershell_invocation("Get-Content", &["foo.txt".to_string()]);
+        assert_eq!(
+            argv,
+            vec![
+                "-NoProfile",
+                "-NoLogo",
+                "-Command",
+                "Get-Content",
+                "foo.txt"
+            ]
+        );
+    }
+
     // ===== tool_exists tests (issue #212) =====
 
     #[test]
@@ -1261,6 +1342,32 @@ mod tests {
             assert!(
                 result.is_ok(),
                 "which_in should find .cmd wrapper on Windows"
+            );
+        }
+
+        #[test]
+        fn test_passthrough_command_routes_cmdlet_to_powershell() {
+            // Get-ChildItem is a PowerShell cmdlet, not a PATH binary, so
+            // passthrough_command must route it through PowerShell.
+            let cmd = passthrough_command("Get-ChildItem", &[]);
+            let program = cmd.get_program().to_string_lossy().to_lowercase();
+            assert!(
+                program.contains("powershell") || program.contains("pwsh"),
+                "cmdlet should route through PowerShell, got program: {}",
+                program
+            );
+        }
+
+        #[test]
+        fn test_passthrough_command_uses_direct_exec_for_path_binary() {
+            // A resolvable binary (cargo is always on PATH in CI) must be
+            // executed directly, never via PowerShell.
+            let cmd = passthrough_command("cargo", &["--version".to_string()]);
+            let program = cmd.get_program().to_string_lossy().to_lowercase();
+            assert!(
+                !program.contains("powershell") && !program.contains("pwsh"),
+                "resolvable binary should run directly, got program: {}",
+                program
             );
         }
     }

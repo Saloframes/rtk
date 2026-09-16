@@ -107,7 +107,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). The full hook system works natively on Windows (and in [WSL](https://learn.microsoft.com/en-us/windows/wsl/install)). See [Windows setup](#windows) below for details.
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). RTK is fully supported on native Windows (no WSL required); for the best filter coverage also install [Coreutils for Windows](https://github.com/microsoft/coreutils) with `winget install Microsoft.Coreutils`. The full hook system works natively on Windows. See [Windows setup](#windows) below for details.
 
 ### Verify Installation
 
@@ -375,41 +375,62 @@ By default `RTK.md` says nothing about RTK itself. Set `[awareness] level = "hig
 
 ## Windows
 
-RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
+RTK runs **natively on Windows — no WSL required**. Since **v0.37.2** the auto-rewrite hook is the `rtk hook claude` binary command (pure Rust), so it installs and runs the same on Windows, Linux, and macOS. Binary resolution honors PATH and PATHEXT, and commands are spawned directly where possible.
 
-### Native Windows (manual install)
+### Native Windows setup
 
 Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
 
 ```powershell
-# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
-# 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin)
+# 1. Install RTK (or download rtk-x86_64-pc-windows-msvc.zip from releases and add rtk.exe to PATH)
+# 2. Install Coreutils for full ls/grep/wc/head/... filter coverage
+winget install Microsoft.Coreutils
 # 3. Initialize — installs the native binary hook
 rtk init -g
+# 4. Confirm hook integrity and Coreutils status
+rtk verify
 ```
 
-**Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook (which does need a Unix shell). Re-run `rtk init -g` to migrate to the native binary hook.
+**Upgrading from an older install?** If RTK was set up before v0.37.2 and still uses the legacy `rtk-rewrite.sh` shell hook, re-run `rtk init -g` to migrate to the native binary hook.
 
-**Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
+### Coreutils for Windows
+
+Some RTK filters wrap UNIX-style commands (`ls`, `grep`, `wc`, `head`, `tail`, `sort`, `uniq`, `cat`). On Linux/macOS these are part of the base system; on Windows, install [Coreutils for Windows](https://github.com/microsoft/coreutils):
+
+```powershell
+winget install Microsoft.Coreutils
+```
+
+It ships each utility under its standard name (`ls.exe`, `grep.exe`, …) on PATH. Filters whose engine is pure Rust (`rtk find`, `rtk read`, `rtk json`, …) work with no extra install. If a wrapped tool is missing, the corresponding filter falls back to raw command output; `rtk verify` reports which tools are present.
+
+**Prerequisites**: some filters also shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
 
 **Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
 
-### WSL
+### PowerShell-native commands
 
-[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) also works and behaves exactly like Linux:
+PowerShell cmdlets (`Get-ChildItem`, `Get-Content`, `Select-String`, …), functions, aliases, and cmd.exe builtins (`dir`, `echo`) are not standalone executables on PATH. When RTK cannot resolve a command as a PATH binary on Windows, it runs it through PowerShell instead of failing:
 
-```bash
-# Inside WSL
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-rtk init -g
+```powershell
+rtk Get-ChildItem        # runs via PowerShell
+rtk Get-Content file.txt # runs via PowerShell
+rtk dir                  # cmd builtin → PowerShell alias
 ```
 
-| Feature | Native Windows | WSL |
-|---------|----------------|-----|
-| Filters (cargo, git, etc.) | Full | Full |
-| Auto-rewrite hook | Yes (native binary) | Yes |
-| `rtk init -g` | Hook mode | Hook mode |
-| `rtk gain` / analytics | Full | Full |
+RTK prefers PowerShell 7+ (`pwsh`) and falls back to Windows PowerShell (`powershell`), using `-NoProfile` for fast, predictable execution. Output is passed through unfiltered; commands with a dedicated filter and an available tool are still filtered as usual.
+
+### WSL
+
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) is still fully supported — inside WSL, RTK behaves exactly like Linux. It is now an option, not a requirement.
+
+| Feature | Native Windows | WSL | Linux/macOS |
+|---------|----------------|-----|-------------|
+| Filters (cargo, git, etc.) | Full | Full | Full |
+| Auto-rewrite hook (`rtk hook claude`) | Full | Full | Full |
+| `rtk init -g` | Hook mode | Hook mode | Hook mode |
+| UNIX-style filters (ls, grep, wc) | With Coreutils | Built-in | Built-in |
+| PowerShell-native commands (cmdlets) | Via PowerShell | n/a | n/a |
+| `rtk gain` / analytics | Full | Full | Full |
 
 ## Supported AI Tools
 
