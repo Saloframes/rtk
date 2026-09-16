@@ -635,7 +635,7 @@ pub fn passthrough_command(program: &str, args: &[String]) -> Command {
     c.args(args);
     c
 }
-}
+
 
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
@@ -667,7 +667,7 @@ pub fn missing_coreutils() -> Vec<&'static str> {
 pub fn env_is_some(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.is_empty())
 }
-}
+
 
 /// Extract short name from AWS ARN.
 /// Example: `arn:aws:ecs:region:acct:service/cluster/name` -> `name`
@@ -906,9 +906,8 @@ mod tests {
                 COREUTILS_TOOLS.contains(tool),
                 "{tool} not in COREUTILS_TOOLS"
             );
-        }
+        };
         assert!(missing.len() <= COREUTILS_TOOLS.len());
-    }
     }
 
     #[test]
@@ -1370,7 +1369,7 @@ mod tests {
                 program
             );
         }
-    }
+	}
 
     // ===== AWS helper function tests =====
 

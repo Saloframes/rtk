@@ -10297,11 +10297,9 @@ mod tests {
             KNOWN_PI_PLUGIN_HASHES.len() >= 8,
             "historical Pi extension hashes must not be removed"
         );
-        assert!(
-            KNOWN_PI_PLUGIN_HASHES
-                .iter()
-                .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        );
+        assert!(KNOWN_PI_PLUGIN_HASHES
+            .iter()
+            .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())));
 
         let current_hash = integrity::compute_hash_bytes(
             normalize_pi_plugin_line_endings(PI_PLUGIN)
@@ -11427,8 +11425,7 @@ mod tests {
         run_vibe_mode_at(&vibe_dir, true, PatchMode::Auto, InitContext::default()).unwrap();
 
         assert!(vibe_dir.join(VIBE_HOOKS_FILE).exists());
-        assert!(
-            !vibe_dir
+        assert!(!vibe_dir
                 .join(VIBE_PROMPTS_SUBDIR)
                 .join(VIBE_PROMPT_FILE)
                 .exists()
