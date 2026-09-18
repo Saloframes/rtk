@@ -802,9 +802,8 @@ fn check_rtk_disabled_bypass() -> Option<String> {
     let mut bypassed: usize = 0;
 
     for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
-            Ok(cmds) => cmds,
-            Err(_) => continue,
+        let Ok(extracted) = provider.extract_commands(session_path) else {
+            continue;
         };
 
         for ext_cmd in &extracted {

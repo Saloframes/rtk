@@ -25,9 +25,8 @@ pub enum HookStatus {
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
     // Don't warn users who don't have Claude Code installed
-    let claude_dir = match resolve_claude_dir() {
-        Ok(d) => d,
-        Err(_) => return HookStatus::Ok,
+    let Ok(claude_dir) = resolve_claude_dir() else {
+        return HookStatus::Ok;
     };
     if !claude_dir.exists() {
         return HookStatus::Ok;
@@ -65,17 +64,15 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         Ok(c) if !c.trim().is_empty() => c,
         _ => return false,
     };
-    let root: serde_json::Value = match from_json_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let Ok(root) = from_json_str::<serde_json::Value>(&content) else {
+        return false;
     };
-    let pre_tool_use = match root
+    let Some(pre_tool_use) = root
         .get("hooks")
         .and_then(|h| h.get(PRE_TOOL_USE_KEY))
         .and_then(|p| p.as_array())
-    {
-        Some(arr) => arr,
-        None => return false,
+    else {
+        return false;
     };
     pre_tool_use
         .iter()
@@ -121,14 +118,14 @@ fn check_and_warn() -> Option<()> {
 
 pub fn parse_hook_version(content: &str) -> u8 {
     // Version tag must be in the first 5 lines (shebang + header convention)
-    for line in content.lines().take(5) {
-        if let Some(rest) = line.strip_prefix("# rtk-hook-version:")
-            && let Ok(v) = rest.trim().parse::<u8>()
-        {
-            return v;
-        }
-    }
-    0 // No version tag = version 0 (outdated)
+    content
+        .lines()
+        .take(5)
+        .find_map(|line| {
+            line.strip_prefix("# rtk-hook-version:")
+                .and_then(|rest| rest.trim().parse::<u8>().ok())
+        })
+        .unwrap_or(0)
 }
 
 fn hook_installed_path() -> Option<PathBuf> {
