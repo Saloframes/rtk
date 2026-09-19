@@ -469,7 +469,23 @@ fn strip_pnpm_global_opts(cmd: &str) -> String {
 /// global-option strip in `classify_command`: adopting the stripped form for a
 /// tool rule would diverge from the rewrite, which matches the original
 /// flag-first text and never fires there. See #3275.
+///
+/// Script/delegation subcommands (`lint`, `run`, `run-script`, `exec`) are
+/// excluded even though `pnpm lint` itself is a valid `rtk pnpm` command:
+/// their recursive forms (`pnpm -r lint`) produce workspace-aggregated output
+/// that `rtk pnpm` is not designed to compress, so adopting the strip there
+/// would advertise savings the hook can never deliver.
 fn matches_pnpm_rule(cmd: &str) -> bool {
+    // Exclude script/delegation subcommands from the strip gate.
+    let subcommand = cmd
+        .strip_prefix("pnpm ")
+        .unwrap_or("")
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or("");
+    if matches!(subcommand, "lint" | "run" | "run-script" | "exec") {
+        return false;
+    }
     REGEX_SET
         .matches(cmd)
         .into_iter()

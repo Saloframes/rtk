@@ -309,12 +309,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let raw = result.combined();
 
-    let filtered = format_playwright_output(
-        &result.stdout,
-        &raw,
-        result.exit_code,
-        verbose,
-    );
+    let filtered = format_playwright_output(&result.stdout, &raw, result.exit_code, verbose);
 
     let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);

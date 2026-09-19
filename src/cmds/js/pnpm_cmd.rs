@@ -464,12 +464,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm outdated")?;
     let combined = result.combined();
 
-    let formatted = format_outdated_output(
-        &result.stdout,
-        &combined,
-        result.exit_code,
-        verbose,
-    );
+    let formatted = format_outdated_output(&result.stdout, &combined, result.exit_code, verbose);
 
     let display = if formatted.text.trim().is_empty() {
         "All packages up-to-date".to_string()
@@ -666,7 +661,10 @@ mod tests {
         assert_eq!(data.outdated_count, 1);
         assert_eq!(data.dependencies[0].name, "left-pad");
         assert_eq!(data.dependencies[0].current_version, "1.0.0");
-        assert_eq!(data.dependencies[0].latest_version.as_deref(), Some("1.3.0"));
+        assert_eq!(
+            data.dependencies[0].latest_version.as_deref(),
+            Some("1.3.0")
+        );
     }
 
     #[test]

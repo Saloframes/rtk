@@ -102,8 +102,8 @@ fn detect_linter(args: &[String]) -> (&str, bool) {
     // when a file or directory of the same name exists in cwd — otherwise a
     // vendored `biome` directory would silently reroute `rtk lint biome
     // check` through ESLint.
-    let known_linter =
-        !args.is_empty() && (is_python_linter(&args[0]) || matches!(args[0].as_str(), "eslint" | "biome"));
+    let known_linter = !args.is_empty()
+        && (is_python_linter(&args[0]) || matches!(args[0].as_str(), "eslint" | "biome"));
 
     if is_path_or_flag || (!known_linter && std::path::Path::new(&args[0]).exists()) {
         ("eslint", false)

@@ -811,6 +811,10 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable.
         use crate::core::tracking::estimate_tokens;
         let savings =
             100.0 - (estimate_tokens(&result) as f64 / estimate_tokens(input) as f64 * 100.0);
-        assert!(savings >= 60.0, "expected >=60% savings, got {:.1}%", savings);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}%",
+            savings
+        );
     }
 }

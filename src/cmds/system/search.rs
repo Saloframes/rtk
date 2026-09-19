@@ -8,7 +8,7 @@ use crate::core::stream::{
     self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -431,19 +431,19 @@ fn engine_command<T: AsRef<str>>(
     line_buffered: bool,
 ) -> Command {
     let mut cmd = resolved_command(engine.bin());
-    cmd.args(engine.parse_flags());
+    cmd.child_args(engine.parse_flags());
     for a in extra_args {
-        cmd.arg(a.as_ref());
+        cmd.child_arg(a.as_ref());
     }
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
     for p in patterns {
-        cmd.args(["-e", p]);
+        cmd.child_args(["-e", p]);
     }
-    cmd.arg("--");
-    cmd.args(paths);
+    cmd.child_arg("--");
+    cmd.child_args(paths);
     cmd
 }
 
@@ -559,10 +559,10 @@ fn passthrough<T: AsRef<str>>(
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
     for a in args {
-        cmd.arg(a.as_ref());
+        cmd.child_arg(a.as_ref());
     }
 
     let exit_code = if stream_stdin {
@@ -627,9 +627,7 @@ fn strip_rg_replace(flags: &[String]) -> Vec<String> {
         // the letter-strip below would rewrite the value (`-r*.rs` -> `-*.s`).
         // extract_pattern_path emits value-taking short flags alone as `-X`.
         let takes_value = (f.starts_with("--") && rg_takes_value(TokenKind::Long, &f[2..]))
-            || (f.len() == 2
-                && f.starts_with('-')
-                && rg_takes_value(TokenKind::Short, &f[1..2]));
+            || (f.len() == 2 && f.starts_with('-') && rg_takes_value(TokenKind::Short, &f[1..2]));
         if takes_value {
             out.push(f.clone());
             if i + 1 < flags.len() {
@@ -688,7 +686,7 @@ pub fn run(
 
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
-        cmd.args(args);
+        cmd.child_args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {

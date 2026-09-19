@@ -14,7 +14,11 @@ use std::path::PathBuf;
 /// default install registers the `rtk hook claude` binary instead, so this
 /// `dirs`-based path is the cross-platform source of truth.)
 fn default_log_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("RTK_AUDIT_DIR") {
+    default_log_path_with(std::env::var("RTK_AUDIT_DIR").ok().as_deref())
+}
+
+fn default_log_path_with(audit_dir: Option<&str>) -> PathBuf {
+    if let Some(dir) = audit_dir {
         return PathBuf::from(dir).join("hook-audit.log");
     }
     dirs::data_local_dir()
@@ -216,10 +220,8 @@ mod tests {
     fn test_default_log_path_is_cross_platform() {
         // RTK_AUDIT_DIR override wins and is used verbatim.
         let tmp = std::env::temp_dir().join("rtk-audit-test");
-        std::env::set_var("RTK_AUDIT_DIR", &tmp);
-        let overridden = default_log_path();
+        let overridden = default_log_path_with(Some(tmp.to_string_lossy().as_ref()));
         assert_eq!(overridden, tmp.join("hook-audit.log"));
-        std::env::remove_var("RTK_AUDIT_DIR");
 
         // Default path lives under the platform data dir, never a hardcoded
         // Unix path. It must end in `rtk/hook-audit.log` and not start with /tmp.

@@ -310,7 +310,11 @@ Code style issues found in the above file(s). Forgot to run Prettier?
                       [\u{1b}[33mwarn\u{1b}[39m] bad.js\n\
                       [\u{1b}[33mwarn\u{1b}[39m] Code style issues found in the above file. Run Prettier with --write to fix.";
         let result = filter_prettier_output_with_exit(output, 1);
-        assert!(result.contains("1 files need formatting"), "got: {}", result);
+        assert!(
+            result.contains("1 files need formatting"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("bad.js"));
         assert!(!result.contains("All files formatted correctly"));
     }

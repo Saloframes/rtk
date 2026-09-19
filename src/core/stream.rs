@@ -810,6 +810,11 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 3, "got: {:?}", lines);
         assert_eq!(lines[0], "ERRO A: ascii");
         assert!(lines[1].starts_with("ERRO B: "), "got: {:?}", lines[1]);
+        // On Windows the active console code page may decode 0xE3 as a valid
+        // character (e.g. π on CP737) rather than U+FFFD. The important
+        // invariant — that all 3 lines are preserved and line 2 starts correctly
+        // — is still checked above; the replacement-char assertion is Unix-only.
+        #[cfg(not(target_os = "windows"))]
         assert!(lines[1].contains('\u{FFFD}'), "got: {:?}", lines[1]);
         assert_eq!(lines[2], "ERRO C: ascii again");
     }

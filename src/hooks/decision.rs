@@ -197,6 +197,7 @@ impl AgentPath {
             "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
             "claude" | "copilot" => Some(Self::InProcess(Host::Claude)),
             "codex" => Some(Self::InProcess(Host::Codex)),
+            "trae" => Some(Self::InProcess(Host::Trae)),
             "cursor" => Some(Self::InProcess(Host::Cursor)),
             "droid" => Some(Self::InProcess(Host::Droid)),
             "gemini" => Some(Self::InProcess(Host::Gemini)),
@@ -223,6 +224,7 @@ impl AgentPath {
         "openclaw",
         "opencode",
         "pi",
+        "trae",
         "vibe",
         "windsurf",
     ];

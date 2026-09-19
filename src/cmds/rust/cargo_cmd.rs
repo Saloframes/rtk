@@ -1292,8 +1292,10 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
             warnings_section.push('\n');
         }
         if warnings.len() > CAP_WARNINGS {
-            warnings_section
-                .push_str(&format!("… +{} more warnings\n", warnings.len() - CAP_WARNINGS));
+            warnings_section.push_str(&format!(
+                "… +{} more warnings\n",
+                warnings.len() - CAP_WARNINGS
+            ));
         }
     }
 

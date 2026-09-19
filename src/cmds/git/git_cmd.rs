@@ -160,9 +160,9 @@ fn log_args_request_machine_output(args: &[String]) -> bool {
             || arg.starts_with("--pretty=format:")
             || arg.starts_with("--pretty=tformat:")
             || (arg == "--pretty"
-                && args
-                    .get(idx + 1)
-                    .is_some_and(|next| next.starts_with("format:") || next.starts_with("tformat:")))
+                && args.get(idx + 1).is_some_and(|next| {
+                    next.starts_with("format:") || next.starts_with("tformat:")
+                }))
     })
 }
 
@@ -420,7 +420,6 @@ fn run_diff(
             );
             return Ok(result.exit_code);
         }
-
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
@@ -3971,17 +3970,23 @@ mod tests {
 
     #[test]
     fn test_git_status_machine_output_args_passthrough() {
-        assert!(status_args_request_machine_output(&["--porcelain".to_string()]));
+        assert!(status_args_request_machine_output(&[
+            "--porcelain".to_string()
+        ]));
         assert!(status_args_request_machine_output(&[
             "--porcelain=v2".to_string()
         ]));
         assert!(status_args_request_machine_output(&["-z".to_string()]));
-        assert!(!status_args_request_machine_output(&["--short".to_string()]));
+        assert!(!status_args_request_machine_output(
+            &["--short".to_string()]
+        ));
     }
 
     #[test]
     fn test_git_log_machine_output_args_passthrough() {
-        assert!(log_args_request_machine_output(&["--format=%H".to_string()]));
+        assert!(log_args_request_machine_output(
+            &["--format=%H".to_string()]
+        ));
         assert!(log_args_request_machine_output(&[
             "--pretty=format:%H".to_string()
         ]));
@@ -4065,7 +4070,10 @@ mod tests {
 
     #[test]
     fn with_trailing_newline_leaves_existing_newline_alone() {
-        assert_eq!(with_trailing_newline(" M tracked.txt\n"), " M tracked.txt\n");
+        assert_eq!(
+            with_trailing_newline(" M tracked.txt\n"),
+            " M tracked.txt\n"
+        );
     }
 
     #[test]

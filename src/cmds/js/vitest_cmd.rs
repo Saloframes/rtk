@@ -650,8 +650,7 @@ Scope: all 6 workspace projects
     #[test]
     fn test_vitest_failed_command_passthrough_includes_stderr() {
         let stdout = "";
-        let combined =
-            "ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL Command \"vitest\" not found\n";
+        let combined = "ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL Command \"vitest\" not found\n";
 
         let filtered = format_test_output("vitest", stdout, combined, 1, false, 0);
 
@@ -679,8 +678,7 @@ Scope: all 6 workspace projects
     fn test_strip_jest_reporters_space_form_consumes_value() {
         // `--reporters default` — the value must not survive as a positional
         // test-name filter (jest would silently run the wrong test set).
-        let result =
-            strip_jest_conflicting_args(&args(&["sum.test.ts", "--reporters", "default"]));
+        let result = strip_jest_conflicting_args(&args(&["sum.test.ts", "--reporters", "default"]));
         assert_eq!(result, args(&["sum.test.ts"]));
     }
 
@@ -713,8 +711,7 @@ Scope: all 6 workspace projects
     fn test_strip_jest_singular_reporter_consumes_at_most_one_value() {
         // --reporter is not a jest flag; yargs binds at most one value to an
         // unknown option, so the test filter after it must survive.
-        let result =
-            strip_jest_conflicting_args(&args(&["--reporter", "default", "sum.test.ts"]));
+        let result = strip_jest_conflicting_args(&args(&["--reporter", "default", "sum.test.ts"]));
         assert_eq!(result, args(&["sum.test.ts"]));
     }
 
@@ -756,7 +753,10 @@ Scope: all 6 workspace projects
             "dist",
             "--watchman",
         ]));
-        assert_eq!(result, args(&["--watchPathIgnorePatterns", "dist", "--watchman"]));
+        assert_eq!(
+            result,
+            args(&["--watchPathIgnorePatterns", "dist", "--watchman"])
+        );
     }
 
     #[test]
