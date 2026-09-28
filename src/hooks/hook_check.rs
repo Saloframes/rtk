@@ -1,17 +1,16 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
+use super::constants::{PRE_TOOL_USE_KEY, SETTINGS_JSON};
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
 use std::path::PathBuf;
 
-const CURRENT_HOOK_VERSION: u8 = 4;
+pub const CURRENT_HOOK_VERSION: u8 = 4;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
 
 /// Hook status for diagnostics and `rtk gain`.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum HookStatus {
     /// Hook is installed and up to date.
     Ok,
@@ -21,44 +20,51 @@ pub enum HookStatus {
     Missing,
 }
 
+pub type AgentProbe = (&'static str, fn() -> bool);
+
+/// All agent probes for active RTK hook/plugin installation.
+/// Every agent owns its own probe inside `src/hooks/init/<agent>.rs`.
+pub const AGENT_PROBES: &[AgentProbe] = &[
+    ("claude", super::init::claude::is_configured),
+    ("antigravity", super::init::antigravity::is_configured),
+    ("cursor", super::init::cursor::is_configured),
+    ("gemini", super::init::gemini::is_configured),
+    ("opencode", super::init::opencode::is_configured),
+    ("codex", super::init::codex::is_configured),
+    ("droid", super::init::droid::is_configured),
+    ("trae", super::init::trae::is_configured),
+    ("hermes", super::init::hermes::is_configured),
+    ("pi", super::init::pi::is_configured),
+    ("vibe", super::init::vibe::is_configured),
+];
+
+/// Returns true if at least one supported agent has an active hook/plugin configured.
+pub fn is_any_agent_configured() -> bool {
+    AGENT_PROBES.iter().any(|(_, probe)| probe())
+}
+
+/// Returns the names of all agents currently configured on this system.
+#[allow(dead_code)]
+pub fn configured_agents() -> Vec<&'static str> {
+    AGENT_PROBES
+        .iter()
+        .filter_map(|(name, probe)| if probe() { Some(*name) } else { None })
+        .collect()
+}
+
+/// Returns true if any configured agent hook is outdated.
+pub fn is_any_hook_outdated() -> bool {
+    super::init::claude::is_outdated() || super::init::cursor::is_outdated()
+}
+
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
-    // Don't warn users who don't have Claude Code installed
-    let claude_dir = match resolve_claude_dir() {
-        Ok(d) => d,
-        Err(_) => return HookStatus::Ok,
-    };
-    if !claude_dir.exists() {
-        return HookStatus::Ok;
-    }
-
-    // Check for new binary command in settings.json first
-    if binary_hook_registered(&claude_dir) {
-        // If old script file still exists alongside new command, report Outdated
-        // (migration not complete — user should run `rtk init -g` to clean up)
-        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-        if old_hook.exists() {
-            return HookStatus::Outdated;
-        }
-        return HookStatus::Ok;
-    }
-
-    // Fall back to legacy script file check
-    let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
-    };
-    let Ok(content) = std::fs::read_to_string(&hook_path) else {
-        return HookStatus::Outdated; // exists but unreadable — treat as needs-update
-    };
-    if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
-        HookStatus::Ok
-    } else {
-        HookStatus::Outdated
-    }
+    super::init::claude::hook_status()
 }
 
 /// Check if the native binary command is registered in settings.json
+#[allow(dead_code)]
 fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
     let settings_path = claude_dir.join(SETTINGS_JSON);
     let content = match std::fs::read_to_string(&settings_path) {
@@ -94,13 +100,17 @@ pub fn maybe_warn() {
 /// Message to print for `status`, if any.
 /// `suppress_missing` only hides [`HookStatus::Missing`]; outdated stays visible.
 fn warning_text(status: HookStatus, suppress_missing: bool) -> Option<&'static str> {
-    match status {
-        HookStatus::Ok => None,
-        HookStatus::Missing if suppress_missing => None,
-        HookStatus::Missing => {
-            Some("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings")
+    if is_any_hook_outdated() || status == HookStatus::Outdated {
+        Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update")
+    } else {
+        match status {
+            HookStatus::Ok => None,
+            HookStatus::Missing if suppress_missing => None,
+            HookStatus::Missing => {
+                Some("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings")
+            }
+            HookStatus::Outdated => Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update"),
         }
-        HookStatus::Outdated => Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update"),
     }
 }
 
@@ -109,11 +119,11 @@ fn check_and_warn() -> Option<()> {
     // Probe first so the common HookStatus::Ok path never reads config.toml.
     // Suppression is consulted only when a missing-hook warning would print.
     let status = status();
-    if status == HookStatus::Ok {
+    if status == HookStatus::Ok && !is_any_hook_outdated() {
         return Some(());
     }
-    let suppress_missing =
-        status == HookStatus::Missing && crate::core::config::hook_warning_suppressed();
+    let suppress_missing = status == HookStatus::Missing
+        && (crate::core::config::hook_warning_suppressed() || is_any_agent_configured());
     let warning = warning_text(status, suppress_missing)?;
 
     // Rate limit: warn once per day
@@ -146,12 +156,6 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
-fn hook_installed_path() -> Option<PathBuf> {
-    let claude_dir = resolve_claude_dir().ok()?;
-    let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if path.exists() { Some(path) } else { None }
-}
-
 fn warn_marker_path() -> Option<PathBuf> {
     let data_dir = dirs::data_local_dir()?.join(RTK_DATA_DIR);
     Some(data_dir.join(".hook_warn_last"))
@@ -162,8 +166,8 @@ mod tests {
     use super::*;
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR,
+        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR, REWRITE_HOOK_FILE,
     };
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
@@ -388,5 +392,40 @@ mod tests {
             "Expected valid HookStatus variant, got {:?}",
             s
         );
+    }
+
+    #[test]
+    fn test_agent_probes_covers_all_supported_agents() {
+        let mut agent_names: Vec<&str> = AGENT_PROBES.iter().map(|(name, _)| *name).collect();
+        agent_names.sort_unstable();
+        assert_eq!(
+            agent_names,
+            vec![
+                "antigravity",
+                "claude",
+                "codex",
+                "cursor",
+                "droid",
+                "gemini",
+                "hermes",
+                "opencode",
+                "pi",
+                "trae",
+                "vibe"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_configured_agents_consistency() {
+        let configured = configured_agents();
+        let any_configured = is_any_agent_configured();
+        assert_eq!(!configured.is_empty(), any_configured);
+        for name in &configured {
+            assert!(
+                AGENT_PROBES.iter().any(|(n, _)| n == name),
+                "configured name {name} must be in AGENT_PROBES"
+            );
+        }
     }
 }
