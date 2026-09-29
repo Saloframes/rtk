@@ -1,9 +1,6 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{PRE_TOOL_USE_KEY, SETTINGS_JSON};
-use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
-use crate::core::utils::from_json_str;
 use std::path::PathBuf;
 
 pub const CURRENT_HOOK_VERSION: u8 = 4;
@@ -43,52 +40,20 @@ pub fn is_any_agent_configured() -> bool {
     AGENT_PROBES.iter().any(|(_, probe)| probe())
 }
 
-/// Returns the names of all agents currently configured on this system.
-#[allow(dead_code)]
-pub fn configured_agents() -> Vec<&'static str> {
-    AGENT_PROBES
-        .iter()
-        .filter_map(|(name, probe)| if probe() { Some(*name) } else { None })
-        .collect()
-}
-
 /// Returns true if any configured agent hook is outdated.
 pub fn is_any_hook_outdated() -> bool {
     super::init::claude::is_outdated() || super::init::cursor::is_outdated()
 }
 
-/// Return the current hook status without printing anything.
-/// Returns `Ok` if no Claude Code is detected (not applicable).
+/// Returns the hook status for Claude Code without printing anything.
+/// Returns `HookStatus::Ok` if Claude Code is not installed on this system.
+///
+/// Note: This probe is intentionally specific to Claude Code because `rtk discover`
+/// and legacy transcript analysis rely specifically on Claude's hook status.
+/// General warning checks should use [`is_any_agent_configured`] and
+/// [`is_any_hook_outdated`] instead.
 pub fn status() -> HookStatus {
     super::init::claude::hook_status()
-}
-
-/// Check if the native binary command is registered in settings.json
-#[allow(dead_code)]
-fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
-    let settings_path = claude_dir.join(SETTINGS_JSON);
-    let content = match std::fs::read_to_string(&settings_path) {
-        Ok(c) if !c.trim().is_empty() => c,
-        _ => return false,
-    };
-    let root: serde_json::Value = match from_json_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let pre_tool_use = match root
-        .get("hooks")
-        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
-        .and_then(|p| p.as_array())
-    {
-        Some(arr) => arr,
-        None => return false,
-    };
-    pre_tool_use
-        .iter()
-        .filter_map(|entry| entry.get("hooks")?.as_array())
-        .flatten()
-        .filter_map(|hook| hook.get("command")?.as_str())
-        .any(is_claude_hook_command)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -164,32 +129,6 @@ fn warn_marker_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::constants::{
-        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR, REWRITE_HOOK_FILE,
-    };
-
-    fn other_integration_installed(home: &std::path::Path) -> bool {
-        let paths = [
-            home.join(CONFIG_DIR)
-                .join(OPENCODE_SUBDIR)
-                .join(PLUGIN_SUBDIR)
-                .join(OPENCODE_PLUGIN_FILE),
-            home.join(CURSOR_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
-            home.join(GEMINI_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(GEMINI_HOOK_FILE),
-            home.join(HERMES_DIR)
-                .join(HERMES_PLUGINS_SUBDIR)
-                .join(HERMES_PLUGIN_NAME)
-                .join(HERMES_PLUGIN_MANIFEST_FILE),
-        ];
-        paths.iter().any(|p| p.exists())
-    }
 
     #[test]
     fn test_parse_hook_version_present() {
@@ -240,114 +179,6 @@ mod tests {
         // Clone works
         let s = HookStatus::Missing;
         assert_eq!(s.clone(), HookStatus::Missing);
-    }
-
-    #[test]
-    fn test_binary_hook_registered_accepts_absolute_rtk_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join(SETTINGS_JSON),
-            r#"{
-                "hooks": {
-                    "PreToolUse": [{
-                        "matcher": "Bash",
-                        "hooks": [{
-                            "type": "command",
-                            "command": "/opt/homebrew/bin/rtk hook claude",
-                            "timeout": 5
-                        }]
-                    }]
-                }
-            }"#,
-        )
-        .expect("write settings");
-
-        assert!(binary_hook_registered(tmp.path()));
-    }
-
-    #[test]
-    fn test_other_integration_none() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!other_integration_installed(tmp.path()));
-    }
-
-    #[test]
-    fn test_other_integration_opencode() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
-            .path()
-            .join(CONFIG_DIR)
-            .join(OPENCODE_SUBDIR)
-            .join(PLUGIN_SUBDIR)
-            .join(OPENCODE_PLUGIN_FILE);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
-    }
-
-    #[test]
-    fn test_other_integration_cursor() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
-            .path()
-            .join(CURSOR_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
-    }
-
-    #[test]
-    fn test_other_integration_codex() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"agents").unwrap();
-        assert!(other_integration_installed(tmp.path()));
-    }
-
-    #[test]
-    fn test_other_integration_gemini() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
-            .path()
-            .join(GEMINI_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(GEMINI_HOOK_FILE);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
-    }
-
-    #[test]
-    fn test_other_integration_hermes() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
-            .path()
-            .join(HERMES_DIR)
-            .join(HERMES_PLUGINS_SUBDIR)
-            .join(HERMES_PLUGIN_NAME)
-            .join(HERMES_PLUGIN_MANIFEST_FILE);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
-    }
-
-    #[test]
-    fn test_other_integration_empty_dirs_not_enough() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(tmp.path().join(CURSOR_DIR).join(HOOKS_SUBDIR)).unwrap();
-        std::fs::create_dir_all(tmp.path().join(CODEX_DIR)).unwrap();
-        std::fs::create_dir_all(tmp.path().join(GEMINI_DIR)).unwrap();
-        std::fs::create_dir_all(
-            tmp.path()
-                .join(HERMES_DIR)
-                .join(HERMES_PLUGINS_SUBDIR)
-                .join(HERMES_PLUGIN_NAME),
-        )
-        .unwrap();
-        assert!(!other_integration_installed(tmp.path()));
     }
 
     #[test]
@@ -414,18 +245,5 @@ mod tests {
                 "vibe"
             ]
         );
-    }
-
-    #[test]
-    fn test_configured_agents_consistency() {
-        let configured = configured_agents();
-        let any_configured = is_any_agent_configured();
-        assert_eq!(!configured.is_empty(), any_configured);
-        for name in &configured {
-            assert!(
-                AGENT_PROBES.iter().any(|(n, _)| n == name),
-                "configured name {name} must be in AGENT_PROBES"
-            );
-        }
     }
 }
