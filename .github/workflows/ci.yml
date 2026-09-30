@@ -71,7 +71,12 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all
+      # Windows debug clap parse of the large Commands enum needs more than the
+      # default thread stack; without this, bin tests overflow (0xc0000409).
+      - name: Run tests
+        env:
+          RUST_MIN_STACK: "8388608"
+        run: cargo test --all
 
   security:
     name: Security Scan
@@ -240,7 +245,7 @@ jobs:
         run: pip install ruff pytest mypy
 
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "stable"
 
@@ -266,8 +271,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUM=${{ github.event.pull_request.number }}
-          gh pr diff "$PR_NUM" --name-only > changed_files.txt
-          gh pr diff "$PR_NUM" | head -c 12000 > diff.txt
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          # Prefer local git: `gh pr diff` 406s when the PR exceeds GitHub's
+          # 20k-line API limit (large Conflicted Syncs).
+          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed_files.txt
+          git diff "${BASE_SHA}...${HEAD_SHA}" | head -c 12000 > diff.txt
           gh pr view "$PR_NUM" --json title,body --jq '"PR Title: \(.title)\nPR Description: \(.body)"' > pr_info.txt
 
       - name: Build prompt files

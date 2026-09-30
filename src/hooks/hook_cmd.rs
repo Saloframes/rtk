@@ -95,7 +95,7 @@ pub fn run_copilot() -> Result<()> {
     };
 
     match detect_format(&v) {
-        HookFormat::VsCode { command } => handle_vscode(&command),
+        HookFormat::VsCode { command } => handle_vscode(&command, &v),
         HookFormat::CopilotCli { command, args } => {
             for path in heal_legacy_copilot_configs() {
                 audit_log("self_heal", &path.display().to_string(), "");
@@ -258,15 +258,19 @@ fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
     decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
 }
 
-fn handle_vscode(cmd: &str) -> Result<()> {
-    if let Some(output) = vscode_response(cmd) {
+fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
+    if let Some(output) = vscode_response(cmd, input) {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
 }
 
-fn vscode_response(cmd: &str) -> Option<Value> {
-    vscode_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+fn vscode_response(cmd: &str, input: &Value) -> Option<Value> {
+    vscode_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude),
+        cmd,
+        input,
+    )
 }
 
 /// Build the VS Code Copilot Chat / Copilot CLI (PascalCase compat) hook response.
@@ -277,7 +281,11 @@ fn vscode_response(cmd: &str) -> Option<Value> {
 /// the host's own native prompt/allowlist flow in control — see #3037, where
 /// asserting `"ask"` here made Copilot CLI 1.0.66+ force a blocking dialog with
 /// no "remember" option on every rewritten command.
-fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+fn vscode_response_from_decision(
+    decision: HookDecision,
+    cmd: &str,
+    input: &Value,
+) -> Option<Value> {
     let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
@@ -290,15 +298,11 @@ fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Va
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": { "command": rewritten }
-    });
-    if allow {
-        hook_output["permissionDecision"] = json!("allow");
-    }
-    Some(json!({ "hookSpecificOutput": hook_output }))
+    Some(pre_tool_use_rewrite_output(
+        input,
+        &rewritten,
+        allow.then_some("allow"),
+    ))
 }
 
 fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
@@ -1456,10 +1460,33 @@ mod tests {
     // answers both from one JSON schema.
 
     #[test]
+    fn test_vscode_rewrite_preserves_tool_input_fields() {
+        let input = json!({
+            "tool_name": "run_in_terminal",
+            "tool_input": {
+                "command": "git status",
+                "timeout": 1234,
+                "description": "Inspect working tree",
+                "metadata": {"nested": [true, null]}
+            }
+        });
+        for decision in [
+            HookDecision::AllowRewrite("rtk git status".into()),
+            HookDecision::AskRewrite("rtk git status".into()),
+        ] {
+            let response = vscode_response_from_decision(decision, "git status", &input).unwrap();
+            let mut expected = input["tool_input"].clone();
+            expected["command"] = json!("rtk git status");
+            assert_eq!(response["hookSpecificOutput"]["updatedInput"], expected);
+        }
+    }
+
+    #[test]
     fn test_vscode_allow_rewrite_sets_permission_allow() {
         let r = vscode_response_from_decision(
             HookDecision::AllowRewrite("rtk git status".into()),
             "git status",
+            &vscode_input("Bash", "git status"),
         )
         .unwrap();
         assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "allow");
@@ -1479,6 +1506,7 @@ mod tests {
         let r = vscode_response_from_decision(
             HookDecision::AskRewrite("rtk cargo test".into()),
             "cargo test",
+            &vscode_input("Bash", "cargo test"),
         )
         .unwrap();
         assert!(
@@ -1497,12 +1525,26 @@ mod tests {
 
     #[test]
     fn test_vscode_deny_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Deny, "cargo test").is_none());
+        assert!(
+            vscode_response_from_decision(
+                HookDecision::Deny,
+                "cargo test",
+                &vscode_input("Bash", "cargo test")
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_vscode_defer_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Defer, "cargo test").is_none());
+        assert!(
+            vscode_response_from_decision(
+                HookDecision::Defer,
+                "cargo test",
+                &vscode_input("Bash", "cargo test")
+            )
+            .is_none()
+        );
     }
 
     // --- Copilot CLI handler: transparent rewrite via modifiedArgs ---
@@ -3384,5 +3426,39 @@ mod tests {
         let v = run_antigravity_inner(&input);
         assert_eq!(v["decision"], "allow");
         assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_pre_prefixed_command_defers() {
+        let v = run_antigravity_inner(&antigravity_input("rtk git status"));
+        assert_eq!(v["decision"], "allow");
+        assert!(
+            v.get("overwrite").is_none(),
+            "already prefixed command must not be rewritten again"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_shell_redirection_and_subshells_defer() {
+        for cmd in [
+            "git status $(whoami)",
+            "git status `whoami`",
+            "git status > /tmp/out.txt",
+            "git status < /tmp/in.txt",
+        ] {
+            let v = run_antigravity_inner(&antigravity_input(cmd));
+            assert_eq!(v["decision"], "allow");
+            assert!(
+                v.get("overwrite").is_none(),
+                "unattestable shell construct must defer without overwrite for {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_antigravity_unknown_binary_passthrough() {
+        let v = run_antigravity_inner(&antigravity_input("definitely-not-a-real-binary --foo"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
     }
 }
