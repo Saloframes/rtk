@@ -48,7 +48,7 @@ output *larger* and more correct. This fork does not claim to save more tokens t
 upstream — that is upstream's pitch. It claims to not lose your errors.
 
 <!-- FORK_DELTA_START -->
-**57 fixes in this fork that upstream does not have.** Each links to the commit,
+**56 fixes in this fork that upstream does not have.** Each links to the commit,
 where the original author is recorded. Adopted fixes come from community PRs that upstream
 has not merged — see the [adoption issues](https://github.com/kylehgc/rtk/issues?q=is%3Aissue+Adopt+upstream)
 for provenance.
@@ -114,7 +114,6 @@ upstream in another form.
 | fix(core): map code page 54936 to GB18030 instead of GBK | [`7ead4165`](https://github.com/kylehgc/rtk/commit/7ead4165) |
 | fix(core): decode process output using Windows console code page | [`13cf9951`](https://github.com/kylehgc/rtk/commit/13cf9951) |
 | fix(hook): emit ask decision for Claude rewrites | [`e93cde81`](https://github.com/kylehgc/rtk/commit/e93cde81) |
-| fix(init): --agent cursor installs Cursor only and creates ~/.cursor | [`c11b018d`](https://github.com/kylehgc/rtk/commit/c11b018d) |
 | fix(windows): run PowerShell-native commands through PowerShell | [`0b440e66`](https://github.com/kylehgc/rtk/commit/0b440e66) |
 | feat(windows): native Windows support without WSL | [`66720010`](https://github.com/kylehgc/rtk/commit/66720010) |
 
