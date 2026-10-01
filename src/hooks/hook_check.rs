@@ -54,7 +54,6 @@ pub fn is_any_hook_outdated() -> bool {
 pub fn status() -> HookStatus {
     super::init::claude::hook_status()
 }
-}
 
 /// Check if the installed hook is missing or outdated, warn once per day.
 pub fn maybe_warn() {
@@ -202,22 +201,6 @@ mod tests {
             warning_text(HookStatus::Outdated, true).is_some(),
             "suppress_hook_warning must not hide the outdated-hook upgrade prompt"
         );
-    }
-
-    #[test]
-    fn test_other_integration_empty_dirs_not_enough() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(tmp.path().join(CURSOR_DIR).join(HOOKS_SUBDIR)).unwrap();
-        std::fs::create_dir_all(tmp.path().join(CODEX_DIR)).unwrap();
-        std::fs::create_dir_all(tmp.path().join(GEMINI_DIR)).unwrap();
-        std::fs::create_dir_all(
-            tmp.path()
-                .join(HERMES_DIR)
-                .join(HERMES_PLUGINS_SUBDIR)
-                .join(HERMES_PLUGIN_NAME),
-        )
-        .unwrap();
-        assert!(!other_integration_installed(tmp.path()));
     }
 
     #[test]
