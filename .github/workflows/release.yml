@@ -59,7 +59,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Cargo.toml on develop still carries whatever release-please last wrote on
       # master, so an RC would otherwise report that stale version in
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Stamp version from tag
         run: bash scripts/version-from-tag.sh "${{ inputs.tag }}"
@@ -146,7 +146,7 @@ jobs:
     container: fedora:latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Stamp version from tag
         run: bash scripts/version-from-tag.sh "${{ inputs.tag }}"
@@ -190,7 +190,7 @@ jobs:
           permission-contents: write
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
