@@ -48,7 +48,7 @@ output *larger* and more correct. This fork does not claim to save more tokens t
 upstream — that is upstream's pitch. It claims to not lose your errors.
 
 <!-- FORK_DELTA_START -->
-**57 fixes in this fork that upstream does not have.** Each links to the commit,
+**58 fixes in this fork that upstream does not have.** Each links to the commit,
 where the original author is recorded. Adopted fixes come from community PRs that upstream
 has not merged — see the [adoption issues](https://github.com/kylehgc/rtk/issues?q=is%3Aissue+Adopt+upstream)
 for provenance.
@@ -60,6 +60,7 @@ upstream in another form.
 
 | Fix | Commit |
 |---|---|
+| fix(hooks): recognize configured agent hooks in warning check (#913) | [`4211f664`](https://github.com/kylehgc/rtk/commit/4211f664) |
 | fix(init): migrate legacy Antigravity rules on install and uninstall | [`69a04d66`](https://github.com/kylehgc/rtk/commit/69a04d66) |
 | feat(hook): add native Google Antigravity plugin lifecycle and hook support | [`61040d08`](https://github.com/kylehgc/rtk/commit/61040d08) |
 | fix(cli): cover the help guards end to end, skip rtk's package-runner prefix, disable clap's help subcommand on wrapped parents | [`66f1cb71`](https://github.com/kylehgc/rtk/commit/66f1cb71) |
