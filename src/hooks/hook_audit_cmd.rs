@@ -1,6 +1,7 @@
 //! Audits hook activity logs to show what commands were rewritten and when.
 
-use crate::core::constants::RTK_DATA_DIR;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,22 +9,21 @@ use std::path::PathBuf;
 /// Default log file location.
 ///
 /// `RTK_AUDIT_DIR` overrides everything. Otherwise the log lives under the
-/// platform data dir (`dirs::data_local_dir()`), matching `tracking.rs` and
+/// platform data dir (`user_dirs::data()`), matching `tracking.rs` and
 /// `tee.rs` — i.e. `~/.local/share/rtk/` on Linux, `%LOCALAPPDATA%\rtk\` on
 /// Windows. (The legacy bash hook used `$HOME/.local/share/rtk/`; the modern
 /// default install registers the `rtk hook claude` binary instead, so this
-/// `dirs`-based path is the cross-platform source of truth.)
+/// data dir is the cross-platform source of truth.)
 fn default_log_path() -> PathBuf {
-    default_log_path_with(std::env::var("RTK_AUDIT_DIR").ok().as_deref())
+    default_log_path_with(user_env::var("RTK_AUDIT_DIR").as_deref())
 }
 
 fn default_log_path_with(audit_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = audit_dir {
         return PathBuf::from(dir).join("hook-audit.log");
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(RTK_DATA_DIR)
+    user_dirs::data()
+        .unwrap_or_else(|| std::env::temp_dir().join(crate::core::constants::RTK_DATA_DIR))
         .join("hook-audit.log")
 }
 
@@ -223,13 +223,13 @@ mod tests {
         let overridden = default_log_path_with(Some(tmp.to_string_lossy().as_ref()));
         assert_eq!(overridden, tmp.join("hook-audit.log"));
 
-        // Default path lives under the platform data dir, never a hardcoded
-        // Unix path. It must end in `rtk/hook-audit.log` and not start with /tmp.
+        // Default path is the platform data dir. Under `cargo test` that dir
+        // is the scratch redirect, not `$HOME/.local/share` or `/tmp`.
         let default = default_log_path();
-        assert!(
-            default.ends_with("rtk/hook-audit.log") || default.ends_with("rtk\\hook-audit.log")
-        );
-        assert!(!default.starts_with("/tmp"));
+        let expected = user_dirs::data()
+            .unwrap_or_else(|| std::env::temp_dir().join(crate::core::constants::RTK_DATA_DIR))
+            .join("hook-audit.log");
+        assert_eq!(default, expected);
     }
 
     #[test]

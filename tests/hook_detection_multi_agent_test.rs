@@ -6,14 +6,14 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+mod common;
 use tempfile::TempDir;
 
 const NO_HOOK_WARNING: &str = "No hook installed";
 const OUTDATED_WARNING: &str = "Hook outdated";
 
 fn seed_tracking(home: &Path) {
-    let _ = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let _ = common::rtk_command()
         .args(["ls"])
         .env("HOME", home)
         .env("USERPROFILE", home)
@@ -25,7 +25,7 @@ fn seed_tracking(home: &Path) {
 }
 
 fn run_rtk_gain(cwd: &Path, home: &Path) -> (bool, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["gain"])
         .current_dir(cwd)
         .env("HOME", home)

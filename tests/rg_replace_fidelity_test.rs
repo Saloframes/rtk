@@ -20,8 +20,10 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+
 fn rtk() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
 }
 
 /// Real ripgrep, not the `rg` alias some environments shim over something else.
