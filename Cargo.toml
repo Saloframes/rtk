@@ -87,3 +87,9 @@ assets = [
 [lints.rust]
 unsafe_code = "deny"
 warnings = "deny"
+
+[profile.dev]
+debug = 1            # Shrinks target directory by reducing debug line precision
+
+[profile.test]
+debug = 0            # Drops debug info entirely for tests to prevent cache thrashing

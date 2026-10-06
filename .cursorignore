@@ -1,0 +1,28 @@
+# Exclude heavy Rust build artifacts
+/target
+target/
+**/*.rs.bk
+
+# Exclude localized readmes that inflate embedding models
+README_es.md
+README_fr.md
+README_ja.md
+README_ko.md
+README_pt.md
+README_zh.md
+
+# Exclude historical logs or lockfiles if not actively editing them
+Cargo.lock
+.rtk/
+
+# Rules & Sync Tools
+convert-rules.ps
+
+
+# Rust / Cargo Compilations
+/target
+target/
+**/*.rs.bk
+
+# Version Control / Agent State
+

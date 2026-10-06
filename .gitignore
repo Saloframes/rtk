@@ -1,5 +1,7 @@
 # Build
 /target
+target/
+**/*.rs.bk
 
 # Environment & Secrets
 .env
@@ -43,8 +45,7 @@ benchmark-report.md
 *.sqlite
 *.sqlite3
 rtk_tracking.db
-# fork: claudedocs/ is intentionally tracked (adoption triage docs for collaborators);
-# upstream ignores it here
+claudedocs
 .omc
 
 # Vitals provenance data
